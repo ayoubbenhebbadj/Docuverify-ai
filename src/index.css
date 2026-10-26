@@ -2,3 +2,4 @@
 body{@apply bg-slate-50 text-ink antialiased}
 :focus-visible{outline:2px solid #2563eb;outline-offset:2px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media print{body{background:#fff}details>summary{list-style:none}}

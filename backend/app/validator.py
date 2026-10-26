@@ -1,6 +1,7 @@
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+
 import re
 
 
@@ -20,7 +21,6 @@ def normalize_document_type(value: str | None) -> str | None:
     }
 
     return aliases.get(normalized, normalized)
-
 # Initial demonstration rules for commercial invoices.
 # We will later make these configurable per document type.
 REQUIRED_FIELDS = {
@@ -39,7 +39,6 @@ def validate_document(data: dict) -> dict:
     document_type = normalize_document_type(
     data.get("document_type")
     )
-
     if document_type not in REQUIRED_FIELDS:
         return {
             "status": "needs_review",

@@ -1,8 +1,57 @@
-node_modules
-dist
+# Environment variables (sensitive - never commit these)
 .env
-.env.*
-!.env.example
-backend/.venv
+.env.local
+.env.*.local
+backend/.env
+
+# Python virtual environment
+.venv/
+venv/
+env/
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+dist/
+build/
+
+# IDE & editor files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.qodo/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.temp

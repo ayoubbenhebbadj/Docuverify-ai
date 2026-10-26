@@ -1,29 +1,24 @@
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { FileText, Clock, AlertCircle, CheckCircle2, Upload, ScanSearch, BarChart3 } from 'lucide-react'
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, PieChart, Pie, Cell, BarChart, Bar, Legend } from 'recharts'
-import { api } from '../services/api'
-import { useAsync } from '../hooks'
-import { Card, Load, PageHeader } from '../components/ui'
+import { FilePlus2, CheckCircle2, XCircle } from 'lucide-react'
+import { checkHealth, API_BASE_URL } from '../services/api'
+import { useAnalysis } from '../state/AnalysisContext'
+import { isOcr } from '../types'
+import { Card, PageHeader, Spinner, StatusBadge } from '../components/ui'
 
+const steps = ['Extracts the text of every PDF page', 'Classifies each page by document type', 'Groups pages that belong to the same document', 'Extracts structured fields from each document', 'Checks required fields and whether quoted evidence appears in the source text', 'Cross-checks values between documents', 'Reports missing documents, unsupported evidence, warnings and mismatches']
 export default function Overview() {
-  const s = useAsync(() => api.getDashboard())
-  const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const [up, setUp] = useState<boolean | null>(null); const { state } = useAnalysis(); const r = state.result
+  useEffect(() => { checkHealth().then(setUp) }, [])
   return <>
-    <PageHeader title="Welcome back, Yasmine" text={`${today}. DocuVerify AI checks import/export paperwork for missing, invalid and inconsistent information so your team can focus on exceptions.`}
-      actions={<Link to="/documents?upload=1" className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"><Upload className="h-4 w-4" />Upload Documents</Link>} />
-    <p className="mb-4 rounded-md border border-blue-100 bg-blue-50 p-3 text-sm text-blue-800">Prototype mode: figures below are sample data. No documents are being analysed until the backend is connected.</p>
-    <Load s={s}>{d => <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{([['Total documents processed', d.kpis.total, FileText, 'text-blue-600'], ['Awaiting review', d.kpis.review, Clock, 'text-amber-600'], ['Incomplete documents', d.kpis.incomplete, AlertCircle, 'text-red-600'], ['Verified documents', d.kpis.verified, CheckCircle2, 'text-green-600']] as const).map(([l, v, Icon, c]) =>
-        <Card key={l} className="flex items-center justify-between p-4"><div><p className="text-sm text-slate-500">{l}</p><p className="mt-1 text-2xl font-semibold">{v}</p></div><Icon className={`h-6 w-6 ${c}`} /></Card>)}</div>
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="p-4 lg:col-span-2"><h2 className="mb-3 text-sm font-semibold">Documents processed per week</h2><div className="h-64"><ResponsiveContainer><LineChart data={d.trend}><CartesianGrid stroke="#e2e8f0" vertical={false} /><XAxis dataKey="week" fontSize={12} /><YAxis fontSize={12} allowDecimals={false} /><Tooltip /><Legend />
-          <Line name="Processed" dataKey="processed" stroke="#2563eb" strokeWidth={2} /><Line name="Flagged" dataKey="flagged" stroke="#d97706" strokeWidth={2} /></LineChart></ResponsiveContainer></div></Card>
-        <Card className="p-4"><h2 className="mb-3 text-sm font-semibold">Verification status</h2><div className="h-64"><ResponsiveContainer><PieChart><Pie data={d.status} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80}>{d.status.map(x => <Cell key={x.name} fill={x.color} />)}</Pie><Tooltip /><Legend /></PieChart></ResponsiveContainer></div></Card>
-      </div>
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="p-4"><h2 className="mb-3 text-sm font-semibold">Most common validation issues</h2><div className="h-56"><ResponsiveContainer><BarChart data={d.issues} layout="vertical" margin={{ left: 20 }}><XAxis type="number" fontSize={12} /><YAxis type="category" dataKey="issue" width={130} fontSize={12} /><Tooltip /><Bar dataKey="count" name="Occurrences" fill="#2563eb" /></BarChart></ResponsiveContainer></div></Card>
-        <Card className="p-4"><h2 className="mb-3 text-sm font-semibold">Recent activity</h2><ul className="space-y-3">{d.activity.map(a => <li key={a.id} className="text-sm">{a.text}<span className="block text-xs text-slate-400">{a.time}</span></li>)}</ul></Card>
-        <Card className="p-4"><h2 className="mb-3 text-sm font-semibold">Quick actions</h2><div className="space-y-2">{([['/documents?upload=1', 'Upload documents', Upload], ['/verification', 'Review flagged documents', ScanSearch], ['/reports', 'Open reports', BarChart3]] as const).map(([to, l, Icon]) =>
-          <Link key={to} to={to} className="flex items-center gap-2 rounded-md border border-slate-200 p-3 text-sm hover:bg-slate-50"><Icon className="h-4 w-4 text-blue-600" />{l}</Link>)}</div></Card>
-      </div></div>}</Load></>
+    <PageHeader title="Shipment document verification" text="Merge the exporter's documents into one PDF, upload it, and review what the system found, what is missing, and what does not match." actions={<Link to="/analysis" className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"><FilePlus2 className="h-4 w-4" />New analysis</Link>} />
+    <div className="grid gap-4 lg:grid-cols-3">
+      <Card className="p-4 lg:col-span-2"><h2 className="mb-3 font-semibold">What happens to your PDF</h2><ol className="space-y-2 text-sm text-slate-700">{steps.map((s, i) => <li key={s} className="flex gap-3"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-xs font-medium">{i + 1}</span>{s}</li>)}</ol>
+        <p className="mt-4 rounded-md bg-slate-50 p-3 text-sm text-slate-700">“Needs review” means the package needs a person’s attention. It does not mean fraud has been found.</p></Card>
+      <div className="space-y-4">
+        <Card className="p-4"><h2 className="mb-2 font-semibold">Backend connection</h2>
+          {up === null ? <p className="flex items-center gap-2 text-sm text-slate-600"><Spinner className="h-4 w-4" />Checking…</p> : up ? <p className="flex items-center gap-2 text-sm text-green-800"><CheckCircle2 className="h-4 w-4" />Connected to {API_BASE_URL}</p> : <p role="alert" className="flex items-start gap-2 text-sm text-red-800"><XCircle className="mt-0.5 h-4 w-4 shrink-0" />Cannot reach {API_BASE_URL}. Start the backend, then reload this page.</p>}</Card>
+        <Card className="p-4"><h2 className="mb-2 font-semibold">Latest analysis</h2>
+          {!r ? <p className="text-sm text-slate-600">No analysis yet in this session.</p> : <div className="space-y-2 text-sm"><p className="break-all font-medium">{r.filename}</p><StatusBadge status={r.status} />{!isOcr(r) && <p className="text-slate-600">{r.documents_found} documents found, {r.missing_documents?.length ?? 0} missing.</p>}<Link className="block text-blue-700 underline" to="/results">Open results</Link></div>}</Card>
+      </div></div></>
 }

@@ -1,11 +1,14 @@
 
 import json
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
+# Load .env from the backend directory first, then fall back to the project root.
+_HERE = Path(__file__).parent.parent  # backend/
+load_dotenv(_HERE / ".env") or load_dotenv(_HERE.parent / ".env")
 
 api_key = os.getenv("OPENROUTER_API_KEY")
 model = os.getenv("OPENROUTER_MODEL")
@@ -95,13 +98,29 @@ def extract_document_fields(document_text: str) -> dict:
         ],
         response_format={"type": "json_object"},
         temperature=0,
-        max_tokens=2000,
+        max_tokens=4000,
     )
 
     content = response.choices[0].message.content
 
-    if not content:
-        raise ValueError("The AI returned an empty response.")
+    choice = response.choices[0]
+    message = choice.message
+    content = message.content
+
+    print("OpenRouter model:", response.model)
+    print("Finish reason:", choice.finish_reason)
+    print("Native finish reason:", getattr(choice, "native_finish_reason", "n/a"))
+    print("Usage:", response.usage)
+    print("Message content:", repr(content))
+    print("Reasoning present:", bool(getattr(message, "reasoning", None)))
+
+    if not content or not content.strip():
+        raise ValueError(
+            "The AI returned no visible text. "
+            f"Model={response.model}, "
+            f"finish_reason={choice.finish_reason}. "
+            "Check the backend terminal for diagnostic details."
+        )
 
     try:
         data = json.loads(content)
