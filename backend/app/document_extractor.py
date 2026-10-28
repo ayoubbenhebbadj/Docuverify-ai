@@ -1,7 +1,8 @@
 
 import json
+import os
 
-from app.ai_extractor import client, model
+from app.ai_extractor import create_with_retry, model, parse_json_content
 
 
 DOCUMENT_SCHEMAS = {
@@ -26,6 +27,7 @@ DOCUMENT_SCHEMAS = {
             "total_net_weight": "Total net weight and unit",
             "total_gross_weight": "Total gross weight and unit",
             "package_count": "Total number of packages",
+            "line_item_amounts": "Array of all printed line-item amount values, excluding freight and grand total",
         },
     },
     "packing_list": {
@@ -92,6 +94,9 @@ DOCUMENT_SCHEMAS = {
             "goods_description": "Description of goods",
             "inspection_results": "Inspection results",
             "issue_date": "Issue date in YYYY-MM-DD format",
+            "total_gross_weight": "Total gross weight and unit, if printed",
+            "total_net_weight": "Total net weight and unit, if printed",
+            "package_count": "Total number of packages, if printed",
         },
     },
     "certificate_of_conformity": {
@@ -106,6 +111,7 @@ DOCUMENT_SCHEMAS = {
             "applicable_standards": "Applicable standards",
             "conformity_status": "Declared conformity status",
             "issue_date": "Issue date in YYYY-MM-DD format",
+            "invoice_number": "Related commercial invoice number, only if explicitly printed",
         },
     },
     "phytosanitary_certificate": {
@@ -121,6 +127,10 @@ DOCUMENT_SCHEMAS = {
             "quantity": "Quantity and unit",
             "inspection_date": "Inspection date in YYYY-MM-DD format",
             "issue_date": "Issue date in YYYY-MM-DD format",
+            "bill_of_lading_number": "Bill of lading number, if printed",
+            "total_gross_weight": "Total gross weight and unit, if printed",
+            "total_net_weight": "Total net weight and unit, if printed",
+            "package_count": "Total number of packages, if printed",
         },
     },
     "fumigation_certificate": {
@@ -136,6 +146,11 @@ DOCUMENT_SCHEMAS = {
             "duration": "Treatment duration",
             "temperature": "Treatment temperature and unit",
             "issue_date": "Issue date in YYYY-MM-DD format",
+            "invoice_number": "Related commercial invoice number, only if explicitly printed",
+            "bill_of_lading_number": "Bill of lading number, if printed",
+            "total_gross_weight": "Total gross weight and unit, if printed",
+            "total_net_weight": "Total net weight and unit, if printed",
+            "package_count": "Total number of packages, if printed",
         },
     },
 }
@@ -211,7 +226,7 @@ Rules:
 8. Preserve units for weights and quantities.
 9. Use numeric values for monetary amounts when unambiguous.
 10. Use ISO currency codes when identifiable.
-11. For fields containing multiple items, use an array of strings.
+11. For fields containing multiple items, use an array of strings. For line_item_amounts, return each printed line-item amount as a separate string and exclude freight and grand total.
 12. Every non-null field must have supporting evidence.
 13. Evidence must be copied from the supplied text.
 14. Keep each evidence value to a short quotation, ideally
@@ -237,7 +252,7 @@ The fields and evidence objects must contain all required field
 names. Keep the response concise. Do not use Markdown fences.
 """
 
-    response = client.chat.completions.create(
+    response = create_with_retry(
         model=model,
         messages=[
             {
@@ -260,7 +275,9 @@ names. Keep the response concise. Do not use Markdown fences.
             }
         },
         temperature=0,
-        max_tokens=10000,
+        # The JSON answer is small, but reasoning models also spend this
+        # budget on hidden thinking; too low a cap truncates the answer.
+        max_tokens=int(os.getenv("EXTRACTION_MAX_TOKENS", "12000")),
     )
 
     if not response.choices:
@@ -290,12 +307,12 @@ names. Keep the response concise. Do not use Markdown fences.
 
         raise ValueError(
             "The AI extraction response was truncated by the "
-            "output-token limit. Reduce the document text or split "
-            "the extraction into smaller requests."
+            "output-token limit. Increase EXTRACTION_MAX_TOKENS or AI_MAX_TOKEN_CAP in .env, "
+            "or use a model with less reasoning."
         )
 
     try:
-        result = json.loads(content)
+        result = parse_json_content(content)
 
     except json.JSONDecodeError as exc:
         print("\n--- INVALID JSON RESPONSE ---")

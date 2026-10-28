@@ -83,7 +83,8 @@ errors = []
 print("=== DOCUMENT SCHEMA CONFIGURATION TEST ===")
 
 for document_type, expected_fields in EXPECTED_SCHEMAS.items():
-    actual_fields = DOCUMENT_SCHEMAS.get(document_type)
+    schema = DOCUMENT_SCHEMAS.get(document_type)
+    actual_fields = list(schema["fields"]) if schema else None
 
     if actual_fields is None:
         errors.append(f"{document_type}: schema is missing")

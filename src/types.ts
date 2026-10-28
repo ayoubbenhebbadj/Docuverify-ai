@@ -14,10 +14,22 @@ export interface DocumentResult {
   confidence: number | null        // 0..1, lowest page confidence in the group
   fields: Record<string, FieldValue>
   validation: DocumentValidation
+  ocr_used?: boolean
+  ocr_review_required?: boolean
+  ocr_pages_low_confidence?: number[]
 }
 export type CheckStatus = 'passed' | 'mismatch' | 'needs_review'
 export interface CrossCheck { check: string; status: CheckStatus | string; values: Record<string, unknown>; message: string }
 export interface CrossValidation { summary: { total_checks: number; passed: number; mismatches: number; needs_review: number }; checks: CrossCheck[] }
+export interface OcrSummary {
+  ocr_used: boolean
+  pages_processed: number[]
+  pages_low_confidence: number[]
+  pages_needing_ocr: number[]
+  average_confidence?: number | null
+  errors?: string[]
+  review_required: boolean
+}
 export interface PackageResult {
   filename: string
   status: 'passed' | 'needs_review' | string
@@ -27,6 +39,7 @@ export interface PackageResult {
   unclassified_pages: number[]
   documents: DocumentResult[]
   cross_document_validation: CrossValidation
+  ocr_summary?: OcrSummary
 }
 export interface OcrResult { filename: string; status: 'needs_ocr'; message: string; page_count: number }
 export type AnalyzeResponse = PackageResult | OcrResult

@@ -23,7 +23,7 @@ export default function NewAnalysis() {
   return <>
     <PageHeader title="New analysis" text="Upload one PDF that contains all of the shipment's documents." />
     <Card className="p-5">
-      <p className="mb-4 rounded-md bg-blue-50 p-3 text-sm text-blue-900">Merge the exporter’s documents into a single PDF before uploading. The PDF needs selectable text (scanned images are reported as needing OCR). Maximum size 10 MB.</p>
+      <p className="mb-4 rounded-md bg-blue-50 p-3 text-sm text-blue-900">Merge the exporter’s documents into a single PDF before uploading. Scanned pages are read automatically with OCR (this can take a few seconds per scanned page). Maximum size 10 MB.</p>
       <div role="button" tabIndex={0} aria-disabled={running} aria-label="Choose a PDF file, or drag one here" onClick={open} onKeyDown={onKey} onDragOver={e => { e.preventDefault(); if (!running) setDrag(true) }} onDragLeave={() => setDrag(false)} onDrop={onDrop}
         className={`flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed p-8 text-center ${drag ? 'border-blue-600 bg-blue-50' : 'border-slate-300'} ${running ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-400'}`}>
         <UploadCloud className="h-8 w-8 text-slate-400" /><p className="text-sm"><span className="font-medium text-blue-700">Choose a PDF</span> or drag it here</p><p className="text-xs text-slate-600">PDF only</p></div>

@@ -16,8 +16,9 @@ export default function Results() {
 
   if (!r) return <><PageHeader title="Analysis results" /><Card className="p-8 text-center"><p className="font-medium">No results yet</p><p className="mt-1 text-sm text-slate-600">Upload a merged shipment PDF to see its report here.</p><Link to="/analysis" className="mt-3 inline-block text-blue-700 underline">Start a new analysis</Link></Card></>
   if (isOcr(r)) return <><PageHeader title={r.filename} actions={<Btn variant="primary" onClick={again}><RotateCcw className="h-4 w-4" />Analyze another PDF</Btn>} />
-    <Card className="p-5"><StatusBadge status="needs_ocr" /><p className="mt-3 font-medium">No selectable text was found in this PDF ({r.page_count} page{r.page_count === 1 ? '' : 's'}).</p><p className="mt-1 text-sm text-slate-700">{r.message} No documents were classified or checked. Ask for a text-based PDF from the exporter, or run OCR on the file and upload it again.</p></Card></>
+    <Card className="p-5"><StatusBadge status="needs_ocr" /><p className="mt-3 font-medium">No selectable text was found in this PDF ({r.page_count} page{r.page_count === 1 ? '' : 's'}).</p><p className="mt-1 text-sm text-slate-700">{r.message} No documents were classified or checked. Try a clearer or higher-resolution scan, or ask the exporter for a text-based PDF.</p></Card></>
 
+  const ocr = r.ocr_summary
   const docs = r.documents ?? [], missing = r.missing_documents ?? [], unclassified = r.unclassified_pages ?? []
   const cv = r.cross_document_validation, checks = cv?.checks ?? [], sum = cv?.summary
   const review = docs.filter(d => d.validation?.status !== 'complete')
@@ -39,6 +40,10 @@ export default function Results() {
     <PageHeader title={r.filename} text={`${r.page_count} pages analyzed`} actions={<><Btn onClick={() => window.print()}><Printer className="h-4 w-4" />Print report</Btn><Btn variant="primary" onClick={again}><RotateCcw className="h-4 w-4" />Analyze another PDF</Btn></>} />
     <div role="status" className={`mb-4 flex items-start gap-3 rounded-lg border p-4 text-sm ${banner[0]}`}><Banner className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-semibold">Overall status: <StatusBadge status={shown} /></p><p className="mt-1">{banner[2]}</p></div></div>
 
+    {ocr?.ocr_used && <div role="note" className={`mb-4 rounded-lg border p-4 text-sm ${ocr.review_required ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-slate-200 bg-white text-slate-700'}`}><p className="font-semibold">Scanned pages were read with OCR</p>
+      <p className="mt-1">Pages {pageRange(ocr.pages_processed)}{typeof ocr.average_confidence === 'number' ? ` · average confidence ${Math.round(ocr.average_confidence)}%` : ''}. {ocr.review_required ? `Check these against the original scan: ${pageRange([...ocr.pages_low_confidence, ...ocr.pages_needing_ocr])}.` : 'OCR confidence was good on every page.'}</p>
+      {(ocr.errors?.length ?? 0) > 0 && <p className="mt-1">OCR problems: {ocr.errors!.join('; ')}</p>}</div>}
+
     <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       <Stat label="Pages processed">{r.page_count}</Stat><Stat label="Documents detected">{r.documents_found}</Stat>
       <Stat label="Required missing" sub={`of ${REQUIRED_DOCS.length} required`}><span className={missing.length ? 'text-red-700' : 'text-green-700'}>{missing.length}</span></Stat>
@@ -57,7 +62,7 @@ export default function Results() {
     {docs.length === 0 ? <Card className="mb-6 p-4 text-sm text-slate-600">No documents were detected.</Card> : <div className="mb-6 space-y-2">{docs.map((d, i) => { const k = keyOf(d, i), v = d.validation
       return <details key={k} id={k} open={printing || openKey === k} onToggle={e => { if (!printing) setOpenKey((e.currentTarget as HTMLDetailsElement).open ? k : openKey === k ? '' : openKey) }} className="rounded-lg border border-slate-200 bg-white">
         <summary className="flex cursor-pointer flex-wrap items-center gap-3 p-3 text-sm"><span className="min-w-40 flex-1 font-medium">{docLabel(d.document_type)}</span><span className="text-slate-600">Pages {pageRange(d.pages ?? [])}</span>
-          {typeof d.confidence === 'number' && <Badge tone="gray">Classified with {Math.round(d.confidence * 100)}% confidence</Badge>}<StatusBadge status={v?.status ?? 'needs_review'} /></summary>
+          {d.ocr_used && <Badge tone={d.ocr_review_required ? 'amber' : 'blue'}>OCR</Badge>}{typeof d.confidence === 'number' && <Badge tone="gray">Classified with {Math.round(d.confidence * 100)}% confidence</Badge>}<StatusBadge status={v?.status ?? 'needs_review'} /></summary>
         <div className="space-y-4 border-t border-slate-100 p-4 text-sm">
           {(v?.missing_fields?.length ?? 0) > 0 && <div><p className="font-medium text-red-800">Missing required fields</p><p>{v.missing_fields.map(titleCase).join(', ')}</p></div>}
           {(v?.invalid_fields?.length ?? 0) > 0 && <div><p className="font-medium text-red-800">Invalid fields</p><ul className="list-disc pl-5">{v.invalid_fields.map(f => <li key={f.field}><b>{titleCase(f.field)}</b>: {f.reason}</li>)}</ul></div>}

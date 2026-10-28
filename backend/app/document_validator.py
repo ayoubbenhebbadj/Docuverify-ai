@@ -1,5 +1,6 @@
 
 import re
+from difflib import SequenceMatcher
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import unicodedata
@@ -120,8 +121,53 @@ def normalize_text(value: str) -> str:
 
 
 
-def evidence_matches(evidence_value, source_text: str) -> bool:
-    """Check whether evidence quotations are supported by the source text."""
+def fuzzy_contains(quote: str, source: str, threshold: float) -> bool:
+    """True if `quote` appears in `source` allowing OCR-style character errors.
+
+    Both strings must already be normalised.  A sliding window of about the
+    quote's length is compared with difflib; short quotes are never matched
+    fuzzily because a few wrong characters would change their meaning.
+    """
+    size = len(quote)
+    if size < 8 or not source:
+        return False
+
+    # Numbers are what the validator exists to protect: every number in the
+    # quote must appear exactly in the source (treating O/0 and I/l/1 as the
+    # same glyph, the classic OCR confusion).  Only words may differ fuzzily.
+    glyphs = str.maketrans("oOlI", "0011")
+    folded_source = source.translate(glyphs)
+    for number in re.findall(r"\d+", quote.translate(glyphs)):
+        if number not in folded_source:
+            return False
+
+    matcher = SequenceMatcher(None, autojunk=False)
+    matcher.set_seq2(quote)
+    step = max(1, size // 16)
+
+    for width in {size, max(1, int(size * 0.9)), int(size * 1.1) + 1}:
+        for start in range(0, max(len(source) - width, 0) + 1, step):
+            matcher.set_seq1(source[start:start + width])
+            if (
+                matcher.real_quick_ratio() >= threshold
+                and matcher.quick_ratio() >= threshold
+                and matcher.ratio() >= threshold
+            ):
+                return True
+
+    return False
+
+
+def evidence_matches(
+    evidence_value,
+    source_text: str,
+    fuzzy_threshold: float | None = None,
+) -> bool:
+    """Check whether evidence quotations are supported by the source text.
+
+    Pass `fuzzy_threshold` (e.g. 0.85) for OCR text so that small recognition
+    errors do not make a correct quotation look unsupported.
+    """
     if not isinstance(source_text, str) or not source_text.strip():
         return False
 
@@ -188,6 +234,12 @@ def evidence_matches(evidence_value, source_text: str) -> bool:
             ):
                 return True
 
+        # 5. OCR text: tolerate a few misread characters.
+        if fuzzy_threshold and fuzzy_contains(
+            normalized_quote, normalized_source, fuzzy_threshold
+        ):
+            return True
+
     return False
 
 
@@ -219,6 +271,7 @@ def parse_decimal(value):
 def validate_document(
     extraction: dict,
     source_text: str,
+    ocr_used: bool = False,
 ) -> dict:
     document_type = extraction.get("document_type")
     fields = extraction.get("fields")
@@ -251,6 +304,9 @@ def validate_document(
     invalid_fields = []
     unsupported_evidence = []
     warnings = []
+
+    # OCR output may contain small recognition errors.
+    fuzzy_threshold = 0.85 if ocr_used else None
 
     # 1. Required fields must be present and non-empty.
     for field in REQUIRED_FIELDS[document_type]:
@@ -310,7 +366,8 @@ def validate_document(
 
         elif field in WEIGHT_FIELDS:
             if not isinstance(value, str) or not re.search(
-                r"\b(kg|g|lb|lbs|tonnes?|t)\b",
+                r"(?<![A-Za-z])(?:kgs?|kilograms?|g|grams?|lbs?|pounds?|"
+                r"tonnes?|tons?|mt|t)(?![A-Za-z])",
                 value,
                 re.IGNORECASE,
             ):
@@ -356,7 +413,7 @@ def validate_document(
 
         quotation = evidence.get(field)
 
-        if evidence_matches(quotation, source_text):
+        if evidence_matches(quotation, source_text, fuzzy_threshold):
             continue
 
         # PDF table extraction may separate a numeric value from its

@@ -7,10 +7,9 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter
 from pytesseract import Output
 
-TESSERACT_PATH = Path(
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
-pytesseract.pytesseract.tesseract_cmd = str(TESSERACT_PATH)
+from app.ocr_engine import _configure_tesseract
+
+_configure_tesseract()
 
 PDF_PATH = Path("scanned_shipment.pdf")
 PAGE_NUMBER = 2  # Human-readable page number

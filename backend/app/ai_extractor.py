@@ -1,6 +1,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,6 +26,48 @@ client = OpenAI(
     timeout=90.0,
     max_retries=2,
 )
+
+
+MAX_TOKEN_CAP = int(os.getenv("AI_MAX_TOKEN_CAP", "32000"))
+
+
+def create_with_retry(**kwargs):
+    """chat.completions.create that retries when the output hit the token limit.
+
+    Reasoning models spend part of max_tokens on hidden "thinking", so a small
+    JSON answer can still be cut off.  Each retry doubles the budget (up to
+    AI_MAX_TOKEN_CAP).  The last response is returned either way; callers still
+    check finish_reason.
+    """
+    budget = kwargs.get("max_tokens", 4000)
+
+    while True:
+        kwargs["max_tokens"] = budget
+        response = client.chat.completions.create(**kwargs)
+
+        truncated = bool(response.choices) and response.choices[0].finish_reason == "length"
+        if not truncated or budget >= MAX_TOKEN_CAP:
+            return response
+
+        budget = min(budget * 2, MAX_TOKEN_CAP)
+        print(f"AI response hit the token limit; retrying with max_tokens={budget}")
+
+
+def parse_json_content(content: str) -> dict:
+    """Parse a model reply as JSON, tolerating Markdown fences / extra prose."""
+    text = (content or "").strip()
+
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.S | re.I)
+    if fenced:
+        text = fenced.group(1)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
 
 
 EXTRACTION_PROMPT = """
@@ -101,29 +144,18 @@ def extract_document_fields(document_text: str) -> dict:
         max_tokens=4000,
     )
 
-    content = response.choices[0].message.content
-
     choice = response.choices[0]
-    message = choice.message
-    content = message.content
-
-    print("OpenRouter model:", response.model)
-    print("Finish reason:", choice.finish_reason)
-    print("Native finish reason:", getattr(choice, "native_finish_reason", "n/a"))
-    print("Usage:", response.usage)
-    print("Message content:", repr(content))
-    print("Reasoning present:", bool(getattr(message, "reasoning", None)))
+    content = choice.message.content
 
     if not content or not content.strip():
         raise ValueError(
             "The AI returned no visible text. "
             f"Model={response.model}, "
-            f"finish_reason={choice.finish_reason}. "
-            "Check the backend terminal for diagnostic details."
+            f"finish_reason={choice.finish_reason}."
         )
 
     try:
-        data = json.loads(content)
+        data = parse_json_content(content)
     except json.JSONDecodeError as exc:
         raise ValueError(
             "The AI did not return valid JSON."

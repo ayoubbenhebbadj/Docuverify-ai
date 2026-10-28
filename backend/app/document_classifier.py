@@ -1,6 +1,6 @@
 import json
 import re
-from app.ai_extractor import client, model
+from app.ai_extractor import create_with_retry, model, parse_json_content
 
 
 DOCUMENT_TYPES = {
@@ -74,10 +74,10 @@ def classify_document_pages(pages: list[dict]) -> dict:
 
         page_texts.append(
             f"--- PAGE {page_number} ---\n"
-            f"{text[:10000] if text else '[NO READABLE TEXT]'}"
+            f"{text[:1200] if text else '[NO READABLE TEXT]'}"
         )
 
-    response = client.chat.completions.create(
+    response = create_with_retry(
         model=model,
         messages=[
             {"role": "system", "content": CLASSIFICATION_PROMPT},
@@ -91,7 +91,8 @@ def classify_document_pages(pages: list[dict]) -> dict:
         ],
         response_format={"type": "json_object"},
         temperature=0,
-        max_tokens=10000,
+        # ~100 tokens per page entry; 500 total truncated the JSON for 6+ pages.
+        max_tokens=min(16000, 3000 + 200 * len(pages)),
     )
 
     choice = response.choices[0]
@@ -104,7 +105,7 @@ def classify_document_pages(pages: list[dict]) -> dict:
         )
 
     try:
-        result = json.loads(content)
+        result = parse_json_content(content)
     except json.JSONDecodeError as exc:
         raise ValueError(
             "The AI returned invalid JSON for page classification."
@@ -115,26 +116,36 @@ def classify_document_pages(pages: list[dict]) -> dict:
     ):
         raise ValueError("The AI classification response has an invalid format.")
 
-    classifications = result["pages"]
     expected_numbers = [page["page"] for page in pages]
 
-    # Require exactly one result for every input page.
-    returned_numbers = [
-        item.get("page") for item in classifications
-        if isinstance(item, dict)
-    ]
+    # Index what the model returned by page number.  A missing or malformed
+    # entry becomes "unknown" for that page instead of failing the whole run.
+    returned = {}
+    for item in result["pages"]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            returned[int(item.get("page"))] = item
+        except (TypeError, ValueError):
+            continue
 
-    if (
-        len(classifications) != len(pages)
-        or returned_numbers != expected_numbers
-    ):
-        raise ValueError(
-            "The AI did not classify every page in the correct order."
-        )
+    if not returned:
+        raise ValueError("The AI classification contained no usable pages.")
+
+    classifications = [
+        returned.get(number, {
+            "page": number,
+            "document_type": "unknown",
+            "starts_new_document": True,
+            "confidence": 0,
+            "evidence": "The AI returned no classification for this page.",
+        })
+        for number in expected_numbers
+    ]
 
     normalized_pages = []
 
-    for item in classifications:
+    for number, item in zip(expected_numbers, classifications):
         document_type = item.get("document_type", "unknown")
 
         if document_type not in DOCUMENT_TYPES:
@@ -149,7 +160,7 @@ def classify_document_pages(pages: list[dict]) -> dict:
 
         normalized_pages.append(
             {
-                "page": item["page"],
+                "page": number,
                 "document_type": document_type,
                 "starts_new_document": bool(
                     item.get("starts_new_document", False)
@@ -161,6 +172,33 @@ def classify_document_pages(pages: list[dict]) -> dict:
 
    
    
+    page_text_by_number = {
+        page["page"]: page.get("text", "")
+        for page in pages
+    }
+
+    # Deterministic title hints correct obvious page-level misses, especially
+    # when OCR is imperfect. Match distinctive titles, not generic references.
+    title_hints = [
+        ("phytosanitary_certificate", re.compile(r"phytosanitary\s+certificate", re.I)),
+        ("certificate_of_origin", re.compile(r"certificate\s+of\s+origin|شهادة\s*منشأ", re.I)),
+        ("certificate_of_conformity", re.compile(r"certificate\s+of\s+conformity|شهادة\s*مطابقة", re.I)),
+        ("certificate_of_quality", re.compile(r"quality\s+certificate|certificate\s+of\s+quality", re.I)),
+        ("fumigation_certificate", re.compile(r"fumigation\s+certificate", re.I)),
+        ("bill_of_lading", re.compile(r"bill\s+of\s+lading", re.I)),
+        ("packing_list", re.compile(r"packing\s+list|بيان\s*عبوة", re.I)),
+        ("commercial_invoice", re.compile(r"commercial\s+invoice", re.I)),
+    ]
+    for item in normalized_pages:
+        page_text = page_text_by_number.get(item["page"], "")
+        for hinted_type, pattern in title_hints:
+            if pattern.search(page_text):
+                item["document_type"] = hinted_type
+                item["starts_new_document"] = True
+                item["confidence"] = max(item["confidence"], 0.90)
+                item["evidence"] = f"Distinctive document title matched: {hinted_type}."
+                break
+
     # Recover short footer/separator pages when their identifiers
     # clearly match the preceding classified document.
 
@@ -258,6 +296,7 @@ def classify_document_pages(pages: list[dict]) -> dict:
         item["page"]
         for item in normalized_pages
         if item["document_type"] == "unknown"
+        and page_text_by_number.get(item["page"], "").strip()
     ]
 
     return {
