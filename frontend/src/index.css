@@ -1,5 +1,92 @@
-@tailwind base;@tailwind components;@tailwind utilities;
-body{@apply bg-slate-50 text-ink antialiased}
-:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
-@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
-@media print{body{background:#fff}details>summary{list-style:none}}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-50 text-ink antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+@keyframes scanline {
+  0% {
+    top: 0%;
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    top: 100%;
+    opacity: 0.8;
+  }
+}
+
+@keyframes pulse-radar {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@keyframes shimmer-bar {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes radar-sweep {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-scanline {
+  animation: scanline 2.2s ease-in-out infinite alternate;
+}
+
+.animate-pulse-radar {
+  animation: pulse-radar 2.4s cubic-bezier(0, 0.2, 0.8, 1) infinite;
+}
+
+.animate-radar-sweep {
+  animation: radar-sweep 4s linear infinite;
+}
+
+.animate-shimmer-bar {
+  background: linear-gradient(90deg, #2563eb 0%, #60a5fa 50%, #2563eb 100%);
+  background-size: 200% 100%;
+  animation: shimmer-bar 2.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  body {
+    background: #fff;
+  }
+  details > summary {
+    list-style: none;
+  }
+}
