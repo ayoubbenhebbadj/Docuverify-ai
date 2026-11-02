@@ -5,7 +5,7 @@ import {
   resolveApiBaseUrl,
   DEFAULT_DEV_API_URL,
   DEFAULT_PROD_API_URL,
-} from './api.ts'
+} from '../src/services/api.ts'
 
 test('normalizeApiUrl removes trailing slashes and redundant /api', () => {
   assert.equal(normalizeApiUrl('https://example.com/'), 'https://example.com')
