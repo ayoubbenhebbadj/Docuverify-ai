@@ -30,17 +30,23 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# Allow the local React dev server to call the API.  Extra origins can be
-# supplied with CORS_ORIGINS="https://a.example,https://b.example".
-_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Allow the local React dev server and production frontend to call the API.
+# Extra origins can be supplied with CORS_ORIGINS="https://a.example,https://b.example".
+_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://docuverify-frontend.vercel.app",
+]
 _origins += [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+# Deduplicate while preserving order
+_origins = list(dict.fromkeys(_origins))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
