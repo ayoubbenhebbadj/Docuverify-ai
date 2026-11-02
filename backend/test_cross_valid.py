@@ -1,0 +1,11 @@
+from app.cross_document_validator import names_match
+
+consignees = [
+    "SARL BIOPPAM",
+    "SARL BIOPPAM ZONE INDUSTRIELLE SECT 02 GP 235 LOC 3, OULEDMOUSSA BOUMERDES ALGER -ALGERIA.",
+    "SARL BIOPPAM ZONE INDUSTRIELLE SECT 02 GP 235 LOC 3 OULEDMOUSSA BOUMERDES ALGER ALGERIA",
+    "SARL BIOPPAM ZONE INDUSTRIELLE SECT 02 GP 235 LOC 3, OULEDMOUSSA BOUMERDES ALGER-ALGERIA.",
+]
+
+for value in consignees[1:]:
+    print(names_match(consignees[0], value))

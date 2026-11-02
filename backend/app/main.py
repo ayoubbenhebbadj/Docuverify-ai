@@ -1,6 +1,7 @@
 import logging
 import os
 import traceback
+import time
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -17,6 +18,10 @@ from app.pdf_reader import extract_pdf_text
 from app.vision_ocr import recover_uncertain_pages
 from app.validator import validate_document as validate_invoice_fields
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 log = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -189,9 +194,16 @@ async def analyze_document(file: UploadFile = File(...)):
 
 
 def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
+    package_started = time.perf_counter()
+    log.info("[TIMING] ===== PACKAGE ANALYSIS START: %s =====", filename)
+
     # 1. Extract text from every PDF page (OCR for scanned pages).
+    stage_started = time.perf_counter()
     pdf_result = extract_pdf_text(pdf_bytes)
+    log.info("[TIMING] Stage PDF extraction/Tesseract: %.2f s", time.perf_counter() - stage_started)
+    stage_started = time.perf_counter()
     pdf_result = recover_uncertain_pages(pdf_bytes, pdf_result)
+    log.info("[TIMING] Stage Vision fallback: %.2f s", time.perf_counter() - stage_started)
 
     if not pdf_result["has_text"]:
         return _no_text_response(filename, pdf_result)
@@ -232,17 +244,20 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
     }
 
     # 2. Classify pages and group them into documents.
+    stage_started = time.perf_counter()
     classification = classify_document_pages(pages)
+    log.info("[TIMING] Stage classification: %.2f s | docs=%s", time.perf_counter() - stage_started, len(classification.get("documents", [])))
 
     extracted_documents = []
     document_results = []
 
-    # 3. Extract fields and validate each detected document.
+    # 3. Extract fields concurrently. These requests are independent after
+    # classification. Keep result ordering aligned with classification output.
+    extraction_jobs = []
     for document in classification["documents"]:
         document_type = document["document_type"]
 
-        # Pages the classifier could not identify are reported through
-        # "unclassified_pages"; there is no schema to extract them with.
+        # Unknown pages have no typed schema to extract.
         if document_type == "unknown":
             continue
 
@@ -250,22 +265,73 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
             page for page in pages
             if page["page"] in document["pages"]
         ]
+        extraction_jobs.append({
+            "document": document,
+            "document_type": document_type,
+            "document_pages": document_pages,
+            "source_text": "\\n".join(page["text"] for page in document_pages),
+            "ocr_used": any(page.get("ocr_used") for page in document_pages),
+        })
 
-        extraction = extract_typed_document(
-            document_type=document_type,
-            pages=document_pages,
+    # Provider limits vary. Default to 3 concurrent calls; override with
+    # EXTRACTION_CONCURRENCY in backend/.env if needed.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    max_workers = max(1, int(os.getenv("EXTRACTION_CONCURRENCY", "3")))
+    extraction_started = time.perf_counter()
+    futures = {}
+
+    def _run_typed_extraction(job):
+        started = time.perf_counter()
+        result = extract_typed_document(
+            document_type=job["document_type"],
+            pages=job["document_pages"],
         )
+        return result, time.perf_counter() - started
 
-        source_text = "\n".join(
-            page["text"] for page in document_pages
-        )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for job in extraction_jobs:
+            futures[executor.submit(_run_typed_extraction, job)] = job
 
-        ocr_used = any(p.get("ocr_used") for p in document_pages)
+        # Log each extraction as soon as it finishes.
+        for future in as_completed(futures):
+            job = futures[future]
+            extraction, elapsed = future.result()  # preserve existing error behavior
+            log.info(
+                "[TIMING] Stage typed extraction %s pages=%s: %.2f s | concurrent_workers=%s",
+                job["document_type"],
+                job["document"]["pages"],
+                elapsed,
+                max_workers,
+            )
+            job["extraction"] = extraction
 
+    log.info(
+        "[TIMING] Stage typed extraction concurrent total: %.2f s | documents=%s | workers=%s",
+        time.perf_counter() - extraction_started,
+        len(extraction_jobs),
+        max_workers,
+    )
+
+    # Validate and assemble in the original classifier order.
+    for job in extraction_jobs:
+        document = job["document"]
+        document_type = job["document_type"]
+        document_pages = job["document_pages"]
+        extraction = job["extraction"]
+        source_text = job["source_text"]
+        ocr_used = job["ocr_used"]
+
+        validation_started = time.perf_counter()
         validation = validate_document(
             extraction,
             source_text,
             ocr_used=ocr_used,
+        )
+        log.info(
+            "[TIMING] Stage document validation %s: %.2f s",
+            document_type,
+            time.perf_counter() - validation_started,
         )
 
         # Identify OCR pages that need manual review for this document.
@@ -307,7 +373,9 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         })
 
     # 4. Compare information across documents.
+    cross_started = time.perf_counter()
     cross_validation = validate_cross_documents(extracted_documents)
+    log.info("[TIMING] Stage cross-document validation: %.2f s", time.perf_counter() - cross_started)
 
     # 5. Summarize package-level issues.
     missing_documents = classification["missing_documents"]
@@ -332,6 +400,9 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         package_status = "needs_review"
     else:
         package_status = "passed"
+
+    total_elapsed = time.perf_counter() - package_started
+    log.info("[TIMING] ===== PACKAGE ANALYSIS TOTAL: %.2f s (%.2f min) | %s =====", total_elapsed, total_elapsed / 60, filename)
 
     return {
         "filename": filename,

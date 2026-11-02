@@ -96,11 +96,10 @@ def resolve_languages(requested: str | None = None) -> str:
         requested = os.getenv("OCR_LANGUAGES")
 
     if requested is None:
-        # Import/export paperwork is often bilingual: add French if present.
-        wanted = ["eng"] + (["fra"] if "fra" in installed else [])
+        # Import/export paperwork may contain Arabic, French, and English.
+        wanted = ["eng", "fra", "ara"]
     else:
-        wanted = [l for l in requested.split("+") if l]
-
+        wanted = [l.strip() for l in requested.split("+") if l.strip()]
     usable = [l for l in wanted if l in installed]
     if not usable:
         usable = ["eng"] if "eng" in installed else sorted(installed - {"osd"})[:1]
@@ -440,20 +439,38 @@ def _merge(passes: list[list[Word]]) -> list[list[Word]]:
 
     return lines
 
-
+def _is_arabic_text(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06ff]", text))
 def _lines_to_text(lines: list[list[Word]]) -> str:
     out = []
-    for line in lines:
-        ordered = sorted(line, key=lambda w: w.left)
-        parts: list[str] = []
-        for i, w in enumerate(ordered):
-            if i:
-                gap = w.left - ordered[i - 1].right
-                parts.append("  " if gap > 2.5 * w.height else " ")
-            parts.append(w.text)
-        out.append("".join(parts))
-    return "\n".join(out)
 
+    for line in lines:
+        line_text = " ".join(w.text for w in line)
+
+        # Arabic-dominant lines should be read from right to left.
+        arabic_chars = len(re.findall(r"[\u0600-\u06ff]", line_text))
+        latin_chars = len(re.findall(r"[A-Za-z]", line_text))
+
+        is_arabic_dominant = arabic_chars > latin_chars
+
+        ordered = sorted(
+            line,
+            key=lambda w: w.left,
+            reverse=is_arabic_dominant,
+        )
+
+        parts = []
+
+        for i, word in enumerate(ordered):
+            if i:
+                gap = abs(word.left - ordered[i - 1].right)
+                parts.append(" ")
+
+            parts.append(word.text)
+
+        out.append("".join(parts))
+
+    return "\n".join(out)
 
 # --------------------------------------------------------------------------
 # Public API

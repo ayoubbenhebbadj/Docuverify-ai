@@ -73,12 +73,47 @@ def _arabic_to_latin_name(value: str) -> str:
     })
     return value.translate(mapping)
 
+def _company_identity(value: str) -> str:
+    """
+    Extract the likely company identity from a company name that may
+    have an address appended to it.
+
+    This is intentionally conservative: only known address markers
+    are treated as the beginning of an appended address.
+    """
+    text = normalize_company_name(value)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    address_markers = (
+        r"\bzone industrielle\b",
+        r"\bindustrial zone\b",
+        r"\bloc(?:ation)?\s+\d+\b",
+        r"\bouledmoussa\b",
+        r"\bboumerdes\b",
+        r"\balger\b",
+        r"\balgeria\b",
+        r"\balgerie\b",
+    )
+
+    for marker in address_markers:
+        match = re.search(marker, text, flags=re.IGNORECASE)
+        if match and match.start() > 0:
+            text = text[:match.start()].strip()
+            break
+
+    return re.sub(r"\s+", " ", text).strip()
 
 def names_match(a: str, b: str, threshold: float = 0.88) -> bool:
     """Compare normalized company names, including simple Arabic transliteration."""
     squash = lambda v: re.sub(r"[^a-z0-9]", "", v.casefold())
     a_norm = normalize_company_name(a)
     b_norm = normalize_company_name(b)
+    # Compare the core company identity when address details are appended.
+    a_identity = _company_identity(a)
+    b_identity = _company_identity(b)
+    if a_identity and b_identity and a_identity == b_identity:
+        return True
     a_has_arabic = bool(re.search(r"[\u0600-\u06ff]", a_norm))
     b_has_arabic = bool(re.search(r"[\u0600-\u06ff]", b_norm))
 

@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 
 import pymupdf as fitz
 
@@ -71,6 +72,7 @@ def _merge_native_text(native: str, ocr_text: str) -> str:
 def extract_pdf_text(pdf_bytes: bytes) -> dict:
     """Extract native PDF text and OCR pages without selectable text."""
 
+    extraction_started = time.perf_counter()
     try:
         with fitz.open(stream=pdf_bytes, filetype="pdf") as document:
             # needs_pass is only True when a password is really required;
@@ -101,10 +103,12 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
                 }
 
                 if needs_ocr:
+                    page_ocr_started = time.perf_counter()
                     try:
                         ocr_result = ocr_page(page)
                     except Exception as exc:  # keep processing other pages
                         log.exception("OCR failed on page %s", page_number)
+                        log.info("[TIMING] Tesseract page %s FAILED after %.2f s", page_number, time.perf_counter() - page_ocr_started)
                         ocr_errors.append(f"page {page_number}: {exc}")
                         page_result["ocr_error"] = str(exc)
                     else:
@@ -116,6 +120,12 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
                         page_result["page"] = page_number
                         page_result["text"] = text
                         page_result["needs_ocr"] = not bool(text.strip())
+                        log.info(
+                            "[TIMING] Tesseract page %s: %.2f s | confidence=%s | words=%s | passes=%s",
+                            page_number, time.perf_counter() - page_ocr_started,
+                            page_result.get("ocr_confidence"), page_result.get("ocr_word_count"),
+                            ",".join((page_result.get("ocr_details") or {}).get("passes", [])),
+                        )
 
                 pages.append(page_result)
 
@@ -137,6 +147,7 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
                 if page["ocr_used"] and page["ocr_low_confidence"]
             ]
 
+            log.info("[TIMING] PDF text extraction + Tesseract total: %.2f s | pages=%s | OCR pages=%s", time.perf_counter() - extraction_started, len(document), sum(bool(p.get("ocr_used")) for p in pages))
             return {
                 "page_count": len(document),
                 "pages": pages,

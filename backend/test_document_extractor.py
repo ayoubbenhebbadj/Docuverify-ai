@@ -6,7 +6,7 @@ from app.document_classifier import classify_document_pages
 from app.document_extractor import extract_typed_document
 
 
-PDF_PATH = r"merged files.pdf"
+PDF_PATH = r"ilovepdf_merged.pdf"
 
 
 with open(PDF_PATH, "rb") as pdf_file:

@@ -58,6 +58,7 @@ Return valid JSON with this structure:
 }
 
 Confidence must be a number from 0 to 1.
+Keep evidence very short (about 3-12 words).
 Return only JSON.
 """
 
@@ -74,7 +75,7 @@ def classify_document_pages(pages: list[dict]) -> dict:
 
         page_texts.append(
             f"--- PAGE {page_number} ---\n"
-            f"{text[:1200] if text else '[NO READABLE TEXT]'}"
+            f"{text[:850] if text else '[NO READABLE TEXT]'}"
         )
 
     response = create_with_retry(
@@ -91,8 +92,9 @@ def classify_document_pages(pages: list[dict]) -> dict:
         ],
         response_format={"type": "json_object"},
         temperature=0,
-        # ~100 tokens per page entry; 500 total truncated the JSON for 6+ pages.
-        max_tokens=min(16000, 3000 + 200 * len(pages)),
+        # Concise evidence keeps the JSON response smaller while allowing one
+        # classification per page. Increase this if your provider truncates output.
+        max_tokens=min(8000, 1200 + 140 * len(pages)),
     )
 
     choice = response.choices[0]

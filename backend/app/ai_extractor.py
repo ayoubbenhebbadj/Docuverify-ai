@@ -2,6 +2,8 @@
 import json
 import os
 import re
+import logging
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,24 +13,99 @@ from openai import OpenAI
 _HERE = Path(__file__).parent.parent  # backend/
 load_dotenv(_HERE / ".env") or load_dotenv(_HERE.parent / ".env")
 
-api_key = os.getenv("OPENROUTER_API_KEY")
-model = os.getenv("OPENROUTER_MODEL")
 
-if not api_key or not model:
-    raise RuntimeError(
-        "OPENROUTER_API_KEY and OPENROUTER_MODEL "
-        "must be configured in backend/.env"
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openrouter").strip().lower()
+
+if AI_PROVIDER == "huggingface":
+    model = os.getenv("HF_MODEL", "").strip()
+    api_key = os.getenv("HF_TOKEN", "").strip()
+
+    if not api_key or not model:
+        raise RuntimeError(
+            "HF_TOKEN and HF_MODEL must be configured "
+            "in backend/.env when AI_PROVIDER=huggingface"
+        )
+
+    client = OpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=2,
     )
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=api_key,
-    timeout=90.0,
-    max_retries=2,
+elif AI_PROVIDER == "openrouter":
+    model = os.getenv("OPENROUTER_MODEL", "").strip()
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+    if not api_key or not model:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY and OPENROUTER_MODEL must be configured "
+            "in backend/.env when AI_PROVIDER=openrouter"
+        )
+
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=2,
+    )
+elif AI_PROVIDER == "groq":
+    model = os.getenv("GROQ_MODEL", "").strip()
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+
+    if not api_key or not model:
+        raise RuntimeError(
+            "GROQ_API_KEY and GROQ_MODEL must be configured "
+            "in backend/.env when AI_PROVIDER=groq"
+        )
+
+    client = OpenAI(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=2,
+    )
+elif AI_PROVIDER == "gemini":
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+    if not api_key or not model:
+        raise RuntimeError(
+            "GEMINI_API_KEY and GEMINI_MODEL must be configured "
+            "in backend/.env when AI_PROVIDER=gemini"
+        )
+
+    client = OpenAI(
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=2,
+    )
+
+
+else:
+    raise RuntimeError(
+    "AI_PROVIDER must be 'huggingface', 'openrouter', 'groq', or 'gemini'."
+    )
+
+
+# Keep vision OCR on its own OpenRouter client/model because vision routing is
+# configured separately from the text model. A text-only HF model cannot accept images.
+vision_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+vision_client = (
+    OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=vision_api_key,
+        timeout=120.0,
+        max_retries=2,
+    )
+    if vision_api_key
+    else None
 )
 
 
 MAX_TOKEN_CAP = int(os.getenv("AI_MAX_TOKEN_CAP", "32000"))
+log = logging.getLogger(__name__)
 
 
 def create_with_retry(**kwargs):
@@ -40,13 +117,24 @@ def create_with_retry(**kwargs):
     check finish_reason.
     """
     budget = kwargs.get("max_tokens", 4000)
+    attempt = 0
+    call_started = time.perf_counter()
 
     while True:
+        attempt += 1
         kwargs["max_tokens"] = budget
-        response = client.chat.completions.create(**kwargs)
+        attempt_started = time.perf_counter()
+        try:
+            response = client.chat.completions.create(**kwargs)
+        except Exception:
+            log.exception("[TIMING] AI provider request failed | provider=%s | model=%s | attempt=%s | elapsed=%.2f s", AI_PROVIDER, kwargs.get("model", model), attempt, time.perf_counter() - attempt_started)
+            raise
+        finish_reason = response.choices[0].finish_reason if response.choices else "no_choices"
+        log.info("[TIMING] AI provider request | provider=%s | model=%s | attempt=%s | %.2f s | finish_reason=%s | max_tokens=%s", AI_PROVIDER, kwargs.get("model", model), attempt, time.perf_counter() - attempt_started, finish_reason, budget)
 
         truncated = bool(response.choices) and response.choices[0].finish_reason == "length"
         if not truncated or budget >= MAX_TOKEN_CAP:
+            log.info("[TIMING] OpenRouter logical call total: %.2f s | attempts=%s", time.perf_counter() - call_started, attempt)
             return response
 
         budget = min(budget * 2, MAX_TOKEN_CAP)

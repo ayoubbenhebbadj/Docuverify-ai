@@ -9,6 +9,7 @@ import base64
 import logging
 import os
 import re
+import time
 from io import BytesIO
 
 import pymupdf as fitz
@@ -62,10 +63,14 @@ def vision_transcribe_page(pdf_bytes: bytes, page_number: int) -> str:
 
     # Import lazily so the fallback helper can be unit-tested without loading
     # the network client, and so this module adds no separate client/key.
-    from app.ai_extractor import client
+    from app.ai_extractor import vision_client
 
+    if vision_client is None:
+        raise RuntimeError("Vision OCR requires OPENROUTER_API_KEY in backend/.env.")
+
+    vision_started = time.perf_counter()
     image_url = _page_data_url(pdf_bytes, page_number)
-    response = client.chat.completions.create(
+    response = vision_client.chat.completions.create(
         model=VISION_MODEL,
         messages=[
             {"role": "system", "content": VISION_TRANSCRIPTION_PROMPT},
@@ -91,6 +96,7 @@ def vision_transcribe_page(pdf_bytes: bytes, page_number: int) -> str:
         )
     if choice.finish_reason == "length":
         raise RuntimeError("Vision transcription was truncated by the model token limit.")
+    log.info("[TIMING] Vision OCR page %s: %.2f s | model=%s", page_number, time.perf_counter() - vision_started, VISION_MODEL)
     return content.strip()
 
 
@@ -110,6 +116,7 @@ def recover_uncertain_pages(pdf_bytes: bytes, pdf_result: dict) -> dict:
 
     pdf_result["vision_ocr_enabled"] = True
     pdf_result["vision_ocr_model"] = VISION_MODEL
+    vision_stage_started = time.perf_counter()
     recovered_pages = []
     attempted_pages = []
     for page in pdf_result.get("pages", []):
@@ -151,6 +158,7 @@ def recover_uncertain_pages(pdf_bytes: bytes, pdf_result: dict) -> dict:
         recovered_pages.append(page_number)
 
     pdf_result["pages_vision_ocr_attempted"] = attempted_pages
+    log.info("[TIMING] Vision OCR fallback stage: %.2f s | attempted=%s | recovered=%s", time.perf_counter() - vision_stage_started, attempted_pages, recovered_pages)
     if recovered_pages:
         pdf_result["extracted_text"] = "\n\n".join(
             f"--- PAGE {p['page']} ---\n{p['text']}"
