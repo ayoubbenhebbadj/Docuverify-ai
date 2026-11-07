@@ -167,6 +167,25 @@ def _find_string(value: str, text: str, fuzzy: bool) -> str | None:
     # 3. OCR noise.
     if fuzzy and fuzzy_contains(norm_value, norm_text, 0.85):
         return _clip(value)
+
+    # 4. Several table cells joined into one value ("SAGE DRIED LEMON CELERY ..."):
+    #    columns interleave in OCR text, so the joined string never appears in one
+    #    piece.  Accept it when (nearly) every word is on the page.  Values with
+    #    numbers are never accepted here - numbers must match exactly (step 2).
+    if not numbers:
+        words = re.findall(r"[^\W\d_]{3,}", norm_value)
+        if len(words) >= 3:
+            page_words = set(re.findall(r"[^\W\d_]{3,}", norm_text))
+            hits = [w for w in words if w in page_words]
+            if len(hits) / len(words) >= (0.9 if fuzzy else 1.0):
+                wanted = set(hits)
+                quotes = []
+                for line in text.splitlines():
+                    if wanted & set(re.findall(r"[^\W\d_]{3,}", normalize_text(line))):
+                        quotes.append(_clip(line))
+                    if len(quotes) >= 6:
+                        break
+                return quotes or None
     return None
 
 

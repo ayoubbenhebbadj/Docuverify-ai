@@ -179,20 +179,28 @@ def classify_document_pages(pages: list[dict]) -> dict:
         for page in pages
     }
 
+    native_title_by_number = {
+        page["page"]: page.get("native_title_text", "")
+        for page in pages
+    }
+
     # Deterministic title hints correct obvious page-level misses, especially
     # when OCR is imperfect. Match distinctive titles, not generic references.
     title_hints = [
         ("phytosanitary_certificate", re.compile(r"phytosanitary\s+certificate", re.I)),
-        ("certificate_of_origin", re.compile(r"certificate\s+of\s+origin|شهادة\s*منشأ", re.I)),
-        ("certificate_of_conformity", re.compile(r"certificate\s+of\s+conformity|شهادة\s*مطابقة", re.I)),
+        ("certificate_of_origin", re.compile(r"certificate\s+of\s+origin|(?<![\u0600-\u06ff])شهادة\s*م[نت]ش[أاء]", re.I)),
+        ("certificate_of_conformity", re.compile(r"certificate\s+of\s+conformity|(?<![\u0600-\u06ff])شهادة\s*مطابقة", re.I)),
         ("certificate_of_quality", re.compile(r"quality\s+certificate|certificate\s+of\s+quality", re.I)),
         ("fumigation_certificate", re.compile(r"fumigation\s+certificate", re.I)),
         ("bill_of_lading", re.compile(r"bill\s+of\s+lading", re.I)),
-        ("packing_list", re.compile(r"packing\s+list|بيان\s*عبوة", re.I)),
+        ("packing_list", re.compile(r"packing\s+list|(?<![\u0600-\u06ff])بيان\s*عبوة", re.I)),
         ("commercial_invoice", re.compile(r"commercial\s+invoice", re.I)),
     ]
     for item in normalized_pages:
         page_text = page_text_by_number.get(item["page"], "")
+        # OCR can garble a bold/underlined Arabic heading that the PDF's own
+        # text layer still holds correctly, so match the native title too.
+        page_text += "\n" + native_title_by_number.get(item["page"], "")
         for hinted_type, pattern in title_hints:
             if pattern.search(page_text):
                 item["document_type"] = hinted_type
