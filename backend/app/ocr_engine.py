@@ -60,8 +60,24 @@ _WINDOWS_CANDIDATES = (
 # Tesseract discovery
 # --------------------------------------------------------------------------
 
+_LOCAL_TESSDATA = Path(__file__).resolve().parent.parent / "tessdata"
+
+
+def _use_bundled_tessdata() -> None:
+    """Point Tesseract at backend/tessdata (Arabic/French/English) when present.
+
+    A stock Tesseract install usually ships English only, which makes Arabic
+    scans come out as garbage.  An explicit TESSDATA_PREFIX always wins.
+    """
+    if os.getenv("TESSDATA_PREFIX"):
+        return
+    if _LOCAL_TESSDATA.is_dir() and any(_LOCAL_TESSDATA.glob("*.traineddata")):
+        os.environ["TESSDATA_PREFIX"] = str(_LOCAL_TESSDATA)
+
+
 @lru_cache(maxsize=1)
 def _configure_tesseract() -> str:
+    _use_bundled_tessdata()
     candidates = [os.getenv("TESSERACT_CMD") or ""]
     candidates.append(shutil.which("tesseract") or "")
     candidates.extend(str(p) for p in _WINDOWS_CANDIDATES)
@@ -101,11 +117,40 @@ def resolve_languages(requested: str | None = None) -> str:
     else:
         wanted = [l.strip() for l in requested.split("+") if l.strip()]
     usable = [l for l in wanted if l in installed]
+    missing = [l for l in wanted if l not in installed]
+    if missing and missing != getattr(resolve_languages, "_warned", None):
+        resolve_languages._warned = missing
+        log.error(
+            "Tesseract language data missing for %s - those scripts will NOT be read. "
+            "Copy <lang>.traineddata into backend/tessdata or install the language pack "
+            "(apt install tesseract-ocr-ara / re-run the Windows installer with Arabic ticked).",
+            ", ".join(missing),
+        )
     if not usable:
         usable = ["eng"] if "eng" in installed else sorted(installed - {"osd"})[:1]
     if not usable:
         raise RuntimeError("No Tesseract language data is installed.")
     return "+".join(usable)
+
+
+_RECOMMENDED_LANGUAGES = (("ara", "Arabic"), ("fra", "French"))
+
+
+def missing_recommended_languages() -> list[str]:
+    """Human-readable warnings for language data that should be installed.
+
+    Empty when the person chose OCR_LANGUAGES explicitly (no nagging).
+    """
+    if os.getenv("OCR_LANGUAGES") is not None:
+        return []
+    installed = _installed_languages()
+    return [
+        f"{name} ({code}) language data is not installed, so {name} text will not be "
+        f"read by OCR. Copy {code}.traineddata into backend/tessdata or install the "
+        f"Tesseract {name} language pack."
+        for code, name in _RECOMMENDED_LANGUAGES
+        if code not in installed
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -372,10 +417,14 @@ def _group_lines(words: list[Word]) -> list[list[Word]]:
         if lines:
             last = lines[-1]
             ref = last[-1]
-            same_line = (
-                abs(w.cy - ref.cy) < 0.6 * max(w.height, ref.height)
-                and w.left >= ref.left - 5
+            level = abs(w.cy - ref.cy) < 0.6 * max(w.height, ref.height)
+            # Latin text advances left->right; Arabic words arrive right->left.
+            rtl = (
+                (_is_arabic_text(w.text) or _is_arabic_text(ref.text))
+                and w.right <= ref.right + 5
+                and (ref.left - w.right) <= 6 * max(w.height, ref.height)
             )
+            same_line = level and (w.left >= ref.left - 5 or rtl)
             if same_line:
                 last.append(w)
                 continue
@@ -574,6 +623,10 @@ def ocr_page(page: fitz.Page, language: str | None = None) -> dict:
             "skew_degrees": round(skew, 1),
             "rotation": rotation,
             "languages": lang,
+            "missing_languages": [
+                l for l in (os.getenv("OCR_LANGUAGES") or "eng+fra+ara").split("+")
+                if l.strip() and l.strip() not in _installed_languages()
+            ],
             "passes": pass_names,
         },
     }

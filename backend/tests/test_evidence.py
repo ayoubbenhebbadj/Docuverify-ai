@@ -94,3 +94,15 @@ def test_grouped_numbers_still_parse():
     assert locate_value(21540, "G.W. 21,540.000 KGS") is not None
     assert locate_value(1234.56, "total 1.234,56 EUR") is not None
     assert locate_value(27500, "N.W. 27 500 KG") is not None
+
+
+def test_joined_table_cells_are_supported_but_invented_values_are_not():
+    from pathlib import Path
+    from app.evidence import locate_value
+    text = (Path(__file__).parent / "phyto_scan_ocr.txt").read_text()
+    # columns interleave in OCR text, so the joined value is never contiguous
+    joined = "SAGE DRIED LEMON CELERY GUM ARABIC (RESIN) WHEAT GRAIN (MAHALEB) THYME (ORIGANO) HIBISCUS"
+    assert locate_value(joined, text, fuzzy=True)
+    assert locate_value("250 BAGS OF 20 KG SAGE 300 BAGS OF 10 KG DRIED LEMON", text, fuzzy=True)
+    assert locate_value("CINNAMON SAFFRON VANILLA CARDAMOM", text, fuzzy=True) is None
+    assert locate_value("999 BAGS OF 20 KG SAGE", text, fuzzy=True) is None
