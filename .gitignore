@@ -55,3 +55,7 @@ htmlcov/
 # Temporary files
 *.tmp
 *.temp
+
+# Sample shipment documents (confidential) - never publish
+backend/*.pdf
+*.pdf

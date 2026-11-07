@@ -117,3 +117,32 @@ def test_cleaning_keeps_the_name_and_drops_the_noise():
 def test_ocr_confusion_does_not_make_different_companies_match():
     assert not names_match(normalize_company_name("بيوييام"), normalize_company_name("NOVA PHARMA"))
     assert not names_match(normalize_company_name("بيوييام"), normalize_company_name("Zohoor Albarryea Herbs"))
+
+
+def test_ocr_stray_h_and_address_suffix_do_not_cause_mismatch():
+    from app.cross_document_validator import strip_address_suffix, names_match, normalize_company_name as n
+    assert strip_address_suffix(
+        "BIOPPAM SARL ZONE INDUSTRIELLE SECT 02 GP 235 LOC 3 OULED MOUSSA 16000 ALGERIA NIF:002035072889131"
+    ) == "BIOPPAM SARL"
+    assert strip_address_suffix("Pharma Zone SARL") == "Pharma Zone SARL"
+    assert names_match(n("ش. ذ. م. م بيوبيهام"), n("BIOPPAM SARL"))
+    assert not names_match(n("ش.ذ.م.م نوفا فارما"), n("BIOPPAM SARL"))
+
+
+def test_ocr_noise_and_address_after_legal_suffix():
+    from app.cross_document_validator import names_match, normalize_company_name as n
+    clean = n("TIANJIN LIESI INTERNATIONAL TRADING CO.,LTD")
+    noisy = n("TIANJIN LIESI INTERNATIONAL TRADING ATE LTD TIANJIN FREE TRADE ZONE CENTRAL BUSINESS DISTRICT VISTA ESTATE 90-1-430 ROOM, CHINA")
+    assert names_match(clean, noisy)
+    assert not names_match(n("Acme Pharma Ltd"), n("Beta Foods Ltd"))
+
+
+def test_invoice_number_mismatch_names_the_odd_document():
+    from app.cross_document_validator import validate_cross_documents as v
+    docs = [
+        {"document_type": "commercial_invoice", "fields": {"invoice_number": "TL2026061101"}},
+        {"document_type": "packing_list", "fields": {"invoice_number": "TL2026051301"}},
+        {"document_type": "certificate_of_origin", "fields": {"invoice_number": "TL2026051301"}},
+    ]
+    check = [c for c in v(docs)["checks"] if c["check"] == "Invoice number"][0]
+    assert check["status"] == "mismatch" and "Commercial invoice" in check["message"]

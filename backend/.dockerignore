@@ -1,0 +1,7 @@
+.env
+*.pdf
+tests/
+test_*.py
+__pycache__/
+.pytest_cache/
+.venv/

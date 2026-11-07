@@ -25,6 +25,28 @@ def _image_coverage(page: fitz.Page) -> float:
     return best
 
 
+_ARABIC_GAP_RE = re.compile(r"[\u0600-\u06ff]\s+[\u0600-\u06ff]")
+_ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
+
+
+def has_broken_arabic_layer(text: str) -> bool:
+    """True when the embedded text layer holds mangled Arabic.
+
+    Word/PDF exports with a bad Unicode map give Arabic letters separated by
+    spaces, dropped letters and reversed fragments.  The text looks present but
+    is unusable, so the page must be OCR'd from its picture instead.
+    """
+    arabic = len(_ARABIC_RE.findall(text))
+    if arabic < 20:
+        return False
+    gaps = len(_ARABIC_GAP_RE.findall(text))
+    # Arabic words average ~4-5 letters; a healthy layer has far fewer
+    # letter-gap-letter hits than letters.  Also flag very short Arabic "words".
+    words = [w for w in re.split(r"\s+", text) if _ARABIC_RE.search(w)]
+    short = sum(1 for w in words if len(w) <= 2)
+    return gaps >= 8 or (words and short / len(words) > 0.45)
+
+
 def page_needs_ocr(page: fitz.Page, text: str) -> bool:
     """Identify pages likely to need OCR, including partial-text scans."""
 
@@ -39,6 +61,9 @@ def page_needs_ocr(page: fitz.Page, text: str) -> bool:
             pass
         return True
 
+    if has_broken_arabic_layer(stripped):
+        return True
+
     coverage = _image_coverage(page)
 
     # A little selectable text (page number, footer, Bates stamp) on top of a
@@ -51,7 +76,7 @@ def page_needs_ocr(page: fitz.Page, text: str) -> bool:
     return False
 
 
-def _merge_native_text(native: str, ocr_text: str) -> str:
+def _merge_native_text(native: str, ocr_text: str, latin_only: bool = False) -> str:
     """Keep native text lines that OCR did not reproduce (e.g. a footer)."""
 
     def norm(value: str) -> str:
@@ -62,6 +87,7 @@ def _merge_native_text(native: str, ocr_text: str) -> str:
         line.strip()
         for line in native.splitlines()
         if len(norm(line)) >= 4 and norm(line) not in ocr_norm
+        and not (latin_only and _ARABIC_RE.search(line))
     ]
 
     if not extra:
@@ -113,9 +139,15 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
                         page_result["ocr_error"] = str(exc)
                     else:
                         text = ocr_result["text"]
+                        broken_layer = has_broken_arabic_layer(native_text)
+                        page_result["broken_arabic_text_layer"] = broken_layer
+                        # Arabic in a broken layer is garbage, but its Latin lines
+                        # (company names, e-mails, numbers) are exact: keep only those.
                         if native_text:
-                            text = _merge_native_text(native_text, text)
+                            text = _merge_native_text(native_text, text, latin_only=broken_layer)
 
+                        # Keep the PDF's own first lines: a clean title there helps classification.
+                        page_result["native_title_text"] = native_text[:2000]
                         page_result.update(ocr_result)
                         page_result["page"] = page_number
                         page_result["text"] = text

@@ -13,6 +13,7 @@ from app.document_classifier import classify_document_pages
 from app.document_extractor import extract_typed_document
 # Two different validators exist; import them under distinct names so the
 # second import can no longer silently replace the first.
+from app.evidence import build_evidence
 from app.document_validator import validate_document
 from app.pdf_reader import extract_pdf_text
 from app.vision_ocr import recover_uncertain_pages
@@ -30,27 +31,29 @@ app = FastAPI(
     version="0.2.0",
 )
 
-# Allow the local React dev server and production frontend to call the API.
-# Extra origins can be supplied with CORS_ORIGINS="https://a.example,https://b.example".
-_origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://docuverify-frontend.vercel.app",
-]
+# Allow the local React dev server to call the API.  Extra origins can be
+# supplied with CORS_ORIGINS="https://a.example,https://b.example".
+_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
 _origins += [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
-# Deduplicate while preserving order
-_origins = list(dict.fromkeys(_origins))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
+
+
+def _language_warnings() -> list[str]:
+    try:
+        from app.ocr_engine import missing_recommended_languages
+        return missing_recommended_languages()
+    except Exception:  # Tesseract missing: reported elsewhere
+        return []
 
 async def read_uploaded_pdf(file: UploadFile) -> tuple[str, bytes]:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -235,6 +238,10 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         "pages_vision_ocr_attempted": pdf_result.get("pages_vision_ocr_attempted", []),
         "pages_low_confidence": pages_low_confidence,
         "pages_needing_ocr": pages_needing_ocr,
+        "pages_broken_arabic_layer": [
+            p["page"] for p in pages if p.get("broken_arabic_text_layer")
+        ],
+        "language_warnings": _language_warnings(),
         "average_confidence": (
             round(sum(confidences) / len(confidences), 1)
             if confidences else None
@@ -275,7 +282,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
             "document": document,
             "document_type": document_type,
             "document_pages": document_pages,
-            "source_text": "\\n".join(page["text"] for page in document_pages),
+            "source_text": "\n".join(page["text"] for page in document_pages),
             "ocr_used": any(page.get("ocr_used") for page in document_pages),
         })
 
@@ -327,6 +334,18 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         extraction = job["extraction"]
         source_text = job["source_text"]
         ocr_used = job["ocr_used"]
+
+        # Find each value in the source text in code.  The model's own quotes often
+        # stitch table cells together in reading order, which never appears verbatim
+        # in OCR text (columns interleave), so they are only a fallback.
+        try:
+            located = build_evidence(extraction["fields"], source_text, fuzzy=ocr_used)
+            extraction.setdefault("evidence", {})
+            for field_name, quote in located.items():
+                if quote:
+                    extraction["evidence"][field_name] = quote
+        except Exception:
+            log.exception("Evidence location failed for %s; using model quotes", document_type)
 
         validation_started = time.perf_counter()
         validation = validate_document(

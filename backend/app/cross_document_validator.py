@@ -36,15 +36,144 @@ def normalize_company_name(value):
 
     # Normalize whitespace and punctuation.
     text = re.sub(r"\s+", " ", text)
-    text = text.strip(" .,:;-").lower()
+    text = text.strip(" .,:;-")
+    # Drop a trailing address while the legal suffix (LTD, LLC ...) is still there to cut at.
+    if not _ARABIC_RE.search(text):
+        text = strip_address_suffix(text)
+    text = text.lower()
 
     # Normalize common OCR spacing variations in legal suffixes.
     text = re.sub(r"(?<=[a-z])(?=(?:gmbh|ltd|limited|llc|inc|corp|sarl)\b)", " ", text)
     # Legal forms are not the core name and are frequently omitted in Arabic.
     text = re.sub(r"\b(?:sarl|gmbh|ltd|limited|llc|inc|corp|corporation)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+co\.?$", "", text)       # "... trading co" / "co.,ltd" remnant
+
+    if _ARABIC_RE.search(text):
+        text = _strip_arabic_noise(text)
+    else:
+        text = strip_address_suffix(text)
 
     return text
+
+_ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
+
+# Words that are not part of an Arabic company name: legal forms, the "for export"
+# suffix, and address fragments that OCR frequently glues onto the name.
+_ARABIC_NOISE_WORDS = {
+    "للتصدير", "لتصدير", "التصدير", "شركة", "شركه", "مؤسسة", "مؤسسه",
+    "قسم", "ملكية", "ملكيه", "مجموعة", "مجموعه", "المنطقة", "المنطقه",
+    "منطقة", "منطقه", "الصناعية", "الصناعيه", "صناعية", "صناعيه",
+    "شارع", "حي", "ولاية", "ولايه", "الجزائر",
+}
+_ADDRESS_WORDS = _ARABIC_NOISE_WORDS - {
+    "للتصدير", "لتصدير", "التصدير", "شركة", "شركه", "مؤسسة", "مؤسسه",
+} | {
+    "zone", "industrielle", "industrial", "sect", "sector", "secteur", "gp",
+    "groupe", "loc", "lot", "rue", "street", "road", "avenue", "boulevard",
+    "bp", "lotissement", "cite", "bloc", "wilaya", "commune",
+}
+
+
+def _arabic_tokens(text):
+    return [t for t in re.split(r"[\s.،]+", text) if t]
+
+
+def _strip_arabic_noise(text):
+    """Drop legal-form letters (ش.ذ.م.م), 'for export' and address words."""
+    kept = []
+    for tok in _arabic_tokens(text):
+        is_arabic = bool(_ARABIC_RE.search(tok))
+        if is_arabic and len(tok) == 1:          # ش / ذ / م / م from legal forms
+            continue
+        if tok in _ARABIC_NOISE_WORDS:
+            continue
+        kept.append(tok)
+    return " ".join(kept)
+
+
+_LEGAL_SUFFIXES = {"ltd", "coltd", "limited", "llc", "inc", "gmbh", "corp", "plc", "sarl", "eurl", "spa"}
+
+
+def strip_address_suffix(value):
+    """'BIOPPAM SARL ZONE INDUSTRIELLE SECT 02 ... NIF:123' -> 'BIOPPAM SARL'.
+
+    Cuts at the first address word (after at least one name word) only when what
+    follows is clearly an address: two or more address words/numbers.
+    """
+    if not value:
+        return value
+    tokens = str(value).split()
+
+    def is_addr(tok):
+        t = tok.casefold().strip(".,;:()")
+        return t in _ADDRESS_WORDS or t.startswith("nif") or any(c.isdigit() for c in t)
+
+    # Everything after a trailing legal form ("... CO.,LTD TIANJIN FREE TRADE ZONE ...") is address.
+    for i, tok in enumerate(tokens[:-1]):
+        flat = re.sub(r"[^a-z0-9]", "", tok.casefold())
+        if i >= 1 and flat in _LEGAL_SUFFIXES:
+            return " ".join(tokens[: i + 1])
+
+    for i in range(1, len(tokens)):
+        t = tokens[i].casefold().strip(".,;:()")
+        if (t in _ADDRESS_WORDS or t.startswith("nif")) and \
+                sum(is_addr(x) for x in tokens[i:]) >= 2:
+            return " ".join(tokens[:i])
+    return value
+
+
+def looks_like_address(value) -> bool:
+    """True when the value is an address fragment rather than a company name."""
+    if value is None:
+        return False
+    tokens = [t.casefold() for t in re.split(r"[\s.,،;:/\-]+", str(value)) if t]
+    hits = sum(1 for t in tokens if t in _ADDRESS_WORDS)
+    rest = [
+        t for t in tokens
+        if t not in _ADDRESS_WORDS and not any(c.isdigit() for c in t)
+        and not (len(t) == 1 and _ARABIC_RE.search(t))
+    ]
+    return hits >= 2 and (not rest or hits >= 3)
+
+
+_AR_SKELETON = {
+    "ب": "b", "پ": "b", "ت": "t", "ث": "t", "ط": "t", "ج": "j",
+    "ح": "h", "ه": "h", "خ": "k", "ك": "k", "ق": "k", "د": "d", "ض": "d",
+    "ذ": "z", "ز": "z", "ظ": "z", "ر": "r", "س": "s", "ص": "s", "ش": "s",
+    "غ": "g", "ف": "f", "ل": "l", "م": "m", "ن": "n",
+    # vowels / semi-vowels / ayn / hamza: dropped, like vowels in Latin
+}
+_LATIN_DIGRAPHS = (("sh", "s"), ("ch", "s"), ("kh", "k"), ("th", "t"),
+                   ("ph", "f"), ("gh", "g"), ("dh", "z"))
+_LATIN_SKELETON = {"p": "b", "v": "f", "c": "k", "q": "k", "x": "ks"}
+
+
+def consonant_skeleton(value) -> str:
+    """Script-independent consonant skeleton, so 'BIOPPAM' == 'بيوببام'.
+
+    Vowels are dropped (they are unwritten or unreliable in Arabic), similar-sounding
+    consonants are folded together and repeated letters are collapsed.
+    """
+    if not value:
+        return ""
+    text = str(value).casefold()
+    text = re.sub(r"[\u064b-\u0652\u0640]", "", text)          # diacritics, tatweel
+    out = []
+    for word in re.split(r"[^a-z\u0600-\u06ff0-9]+", text):
+        if not word:
+            continue
+        if _ARABIC_RE.search(word):
+            word = re.sub(r"[هة]$", "", word)                   # final ه/ة is a vowel (-a)
+            letters = [_AR_SKELETON.get(ch, "") for ch in word]
+        else:
+            for src, dst in _LATIN_DIGRAPHS:
+                word = word.replace(src, dst)
+            letters = [_LATIN_SKELETON.get(ch, ch) for ch in word if ch not in "aeiouyw"]
+        out.extend(letters)
+    skeleton = "".join(out)
+    return re.sub(r"(.)\1+", r"\1", skeleton)
+
 
 def normalize_identifier(value):
     """Normalise a document number, tolerating common OCR confusions."""
@@ -117,6 +246,21 @@ def names_match(a: str, b: str, threshold: float = 0.88) -> bool:
     a_has_arabic = bool(re.search(r"[\u0600-\u06ff]", a_norm))
     b_has_arabic = bool(re.search(r"[\u0600-\u06ff]", b_norm))
 
+    # Cross-script comparison on consonant skeletons (handles Arabic vs Latin spellings
+    # and common OCR letter confusions such as ب read as ي).
+    if a_has_arabic or b_has_arabic:
+        sk_a, sk_b = consonant_skeleton(a_norm), consonant_skeleton(b_norm)
+        if sk_a and sk_b:
+            if sk_a == sk_b:
+                return True
+            # OCR often inserts a stray ه ("بيوبيهام" for "بيوببام"); retry without h.
+            nh_a, nh_b = sk_a.replace("h", ""), sk_b.replace("h", "")
+            if min(len(nh_a), len(nh_b)) >= 2 and nh_a == nh_b:
+                return True
+            if min(len(sk_a), len(sk_b)) >= 5 and \
+                    SequenceMatcher(None, sk_a, sk_b).ratio() >= 0.85:
+                return True
+
     candidates_a = {squash(a_norm)}
     candidates_b = {squash(b_norm)}
     if a_has_arabic:
@@ -149,6 +293,12 @@ def names_match(a: str, b: str, threshold: float = 0.88) -> bool:
         return False
     if candidates_a.intersection(candidates_b):
         return True
+    # One side may omit trailing descriptors ("... International Trading Co").
+    for left in candidates_a:
+        for right in candidates_b:
+            short, long_ = sorted((left, right), key=len)
+            if len(short) >= 8 and long_.startswith(short):
+                return True
     return max(
         SequenceMatcher(None, left, right).ratio()
         for left in candidates_a for right in candidates_b
@@ -241,6 +391,55 @@ def validate_cross_documents(documents):
             "message": message,
         })
 
+    def _label(doc_type):
+        return str(doc_type).replace("_", " ").capitalize()
+
+    def _compare_companies(name, values):
+        """Group names by identity; blame only the documents that disagree with the majority."""
+        address_docs = {
+            d: v for d, v in values.items()
+            if looks_like_address(strip_address_suffix(v))
+        }
+        usable = {d: v for d, v in values.items() if d not in address_docs}
+        address_note = ""
+        if address_docs:
+            address_note = (
+                f"{', '.join(_label(d) for d in address_docs)}: extracted value looks like "
+                "an address, not a company name - check the extraction. "
+            )
+
+        groups = []   # each: list of doc types whose names refer to the same company
+        for doc_type, value in usable.items():
+            cleaned = normalize_company_name(value)
+            for group in groups:
+                if names_match(normalize_company_name(usable[group[0]]), cleaned):
+                    group.append(doc_type)
+                    break
+            else:
+                groups.append([doc_type])
+
+        if len(usable) < 2:
+            add_check(name, values, "needs_review",
+                      (address_note + "Not enough usable names to compare.").strip())
+            return
+
+        if len(groups) == 1:
+            if address_docs:
+                add_check(name, values, "needs_review", address_note.strip())
+            else:
+                add_check(name, values, "passed", "Values match.")
+            return
+
+        groups.sort(key=len, reverse=True)
+        if len(groups[0]) > len(groups[1]):
+            odd = [d for g in groups[1:] for d in g]
+            detail = "; ".join(f"{_label(d)} ({usable[d]})" for d in odd)
+            message = f"Differs from the majority of documents: {detail}."
+        else:
+            message = "Documents disagree: " + " vs ".join(
+                ", ".join(_label(d) for d in g) for g in groups) + "."
+        add_check(name, values, "mismatch", (address_note + message).strip())
+
     def compare_text(name, field_sources):
         values = {}
 
@@ -261,8 +460,8 @@ def validate_cross_documents(documents):
         raw = list(values.values())
 
         if name in ("Exporter / shipper", "Consignee"):
-            names = [normalize_company_name(v) for v in raw]
-            same = all(names_match(names[0], n) for n in names[1:])
+            _compare_companies(name, values)
+            return
         elif name == "Invoice number":
             ids = {normalize_identifier(v) for v in raw}
             same = len(ids) == 1
@@ -271,8 +470,23 @@ def validate_cross_documents(documents):
 
         if same:
             add_check(name, values, "passed", "Values match.")
+            return
+
+        key = normalize_identifier if name == "Invoice number" else normalize
+        groups = {}
+        for doc_type, value in values.items():
+            groups.setdefault(key(value), []).append(doc_type)
+        ordered = sorted(groups.values(), key=len, reverse=True)
+        if len(ordered[0]) > len(ordered[1]):
+            odd = "; ".join(
+                f"{_label(d)} ({values[d]})" for g in ordered[1:] for d in g
+            )
+            message = f"Differs from the majority of documents: {odd}."
         else:
-            add_check(name, values, "mismatch", "Values differ between documents.")
+            message = "Documents disagree: " + " vs ".join(
+                ", ".join(f"{_label(d)} ({values[d]})" for d in g) for g in ordered
+            ) + "."
+        add_check(name, values, "mismatch", message)
 
     # 1. Invoice number
     compare_text(
