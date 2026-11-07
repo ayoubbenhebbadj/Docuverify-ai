@@ -2,7 +2,6 @@ import type { AnalyzeResponse } from '../types'
 
 export const DEFAULT_DEV_API_URL = 'http://127.0.0.1:8000'
 export const DEFAULT_PROD_API_URL = 'https://docuverify-backend-l6g7.onrender.com'
-import { ... } from "./api";
 /**
  * Normalizes an API base URL:
  * - Trims whitespace
