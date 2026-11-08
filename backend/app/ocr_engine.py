@@ -630,3 +630,79 @@ def ocr_page(page: fitz.Page, language: str | None = None) -> dict:
             "passes": pass_names,
         },
     }
+
+
+# --------------------------------------------------------------------------
+# Array-based API used by the PDF reader and tests
+# --------------------------------------------------------------------------
+
+def ocr_image(image: np.ndarray, dpi: float = 300, language: str | None = None) -> dict:
+    """OCR an RGB/BGR image array without requiring a live PyMuPDF page.
+
+    Very sparse images (logos, stamps, blank scans) use one recognition pass;
+    completely blank images return immediately.
+    """
+    if image is None or not isinstance(image, np.ndarray) or image.size == 0:
+        return {
+            "text": "", "ocr_used": True, "ocr_confidence": None,
+            "ocr_word_count": 0, "ocr_low_confidence": False,
+            "ocr_sparse": True, "ocr_blank": True, "ocr_details": {"passes": []},
+        }
+
+    if image.ndim == 2:
+        rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+    elif image.shape[2] == 4:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGRA2RGB)
+    else:
+        # OpenCV callers commonly supply BGR; convert to RGB.
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    ink_ratio = float(np.count_nonzero(gray < 235)) / max(gray.size, 1)
+    if ink_ratio < 0.0005:
+        return {
+            "text": "", "ocr_used": True, "ocr_confidence": None,
+            "ocr_word_count": 0, "ocr_low_confidence": False,
+            "ocr_sparse": True, "ocr_blank": True,
+            "ocr_details": {"source_dpi": round(float(dpi)), "passes": []},
+        }
+
+    sparse = ink_ratio < 0.015 and os.getenv("OCR_THOROUGH") != "1"
+    if sparse:
+        lang = resolve_languages(language)
+        # A sparse logo/stamp page is better treated as a normal page layout
+        # after grayscale normalisation; this also avoids the sparse-text mode
+        # hallucinating isolated logo shapes as words.
+        processed = _normalise_background(gray, float(dpi))
+        processed, scale = _upscale(processed, float(dpi))
+        processed = _pad(processed)
+        words = _recognise(processed, 3, lang)
+        lines = _group_lines(words)
+        text = _lines_to_text(lines)
+        confidence = _mean_conf(words)
+        return {
+            "text": text, "ocr_used": True, "ocr_confidence": confidence,
+            "ocr_word_count": len(words),
+            "ocr_low_confidence": confidence is None or confidence < LOW_CONFIDENCE_THRESHOLD,
+            "ocr_sparse": True, "ocr_blank": not bool(text.strip()),
+            "ocr_details": {
+                "source_dpi": round(float(dpi)), "scale": round(scale, 2),
+                "languages": lang, "passes": ["psm3/gray"],
+            },
+        }
+
+    # Reuse the fully tuned page pipeline by embedding the supplied pixels in a
+    # temporary in-memory PDF at the caller's effective DPI.
+    ok, encoded = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    if not ok:
+        raise ValueError("Could not encode image for OCR.")
+    height, width = rgb.shape[:2]
+    page_width = max(width * 72.0 / max(float(dpi), 1.0), 1.0)
+    page_height = max(height * 72.0 / max(float(dpi), 1.0), 1.0)
+    with fitz.open() as doc:
+        page = doc.new_page(width=page_width, height=page_height)
+        page.insert_image(page.rect, stream=encoded.tobytes())
+        result = ocr_page(page, language=language)
+    result["ocr_sparse"] = False
+    result["ocr_blank"] = not bool(result.get("text", "").strip())
+    return result

@@ -33,7 +33,11 @@ app = FastAPI(
 
 # Allow the local React dev server to call the API.  Extra origins can be
 # supplied with CORS_ORIGINS="https://a.example,https://b.example".
-_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://docuverify-frontend.vercel.app",
+]
 _origins += [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
 app.add_middleware(
@@ -47,13 +51,13 @@ app.add_middleware(
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-
 def _language_warnings() -> list[str]:
     try:
         from app.ocr_engine import missing_recommended_languages
         return missing_recommended_languages()
     except Exception:  # Tesseract missing: reported elsewhere
         return []
+
 
 async def read_uploaded_pdf(file: UploadFile) -> tuple[str, bytes]:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -202,6 +206,47 @@ async def analyze_document(file: UploadFile = File(...)):
         raise _handle_unexpected("document analysis", exc) from exc
 
 
+def _combined_page_source(page: dict) -> str:
+    """Build a labelled, non-destructive text source for one PDF page."""
+
+    page_number = page.get("page", "?")
+
+    native_text = str(
+        page.get("native_text")
+        or page.get("native_title_text")
+        or ""
+    ).strip()
+
+    ocr_text = str(page.get("ocr_text") or "").strip()
+    vision_text = str(page.get("vision_text") or "").strip()
+
+    # Compatibility with existing page dictionaries.
+    if not native_text and not ocr_text and not vision_text:
+        ocr_text = str(page.get("text") or "").strip()
+
+    sections = [f"--- PDF PAGE {page_number} ---"]
+
+    if native_text:
+        sections.append(
+            "[ORIGINAL PDF TEXT LAYER]\n" + native_text
+        )
+
+    if ocr_text:
+        sections.append(
+            "[TESSERACT OCR]\n" + ocr_text
+        )
+
+    if vision_text:
+        sections.append(
+            "[VISION OCR]\n" + vision_text
+        )
+
+    if len(sections) == 1:
+        sections.append("[NO READABLE TEXT]")
+
+    return "\n\n".join(sections)
+
+
 def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
     package_started = time.perf_counter()
     log.info("[TIMING] ===== PACKAGE ANALYSIS START: %s =====", filename)
@@ -282,15 +327,35 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
             "document": document,
             "document_type": document_type,
             "document_pages": document_pages,
-            "source_text": "\n".join(page["text"] for page in document_pages),
+            # Rich, labelled source for typed extraction and evidence lookup.
+            "source_text": "\n\n".join(
+                _combined_page_source(page)
+                for page in document_pages
+            ),
+            # Plain text for the legacy validator: do not inject page headers
+            # or OCR source labels into the text it receives.
+            "validation_text": "\n".join(
+                str(page.get("text") or "").strip()
+                for page in document_pages
+                if str(page.get("text") or "").strip()
+            ),
             "ocr_used": any(page.get("ocr_used") for page in document_pages),
         })
 
-    # Provider limits vary. Default to 3 concurrent calls; override with
-    # EXTRACTION_CONCURRENCY in backend/.env if needed.
+    # Submit larger documents first so the longest independent request starts early,
+    # while keeping extraction_jobs in classifier order for the final response.
+    submission_jobs = sorted(
+        extraction_jobs, key=lambda job: len(job["source_text"]), reverse=True
+    )
+
+    # By default, allow one worker per document; cap explicitly in .env if needed.
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    max_workers = max(1, int(os.getenv("EXTRACTION_CONCURRENCY", "3")))
+    try:
+        configured_workers = int(os.getenv("EXTRACTION_CONCURRENCY", str(len(extraction_jobs) or 1)))
+    except (TypeError, ValueError):
+        configured_workers = len(extraction_jobs) or 1
+    max_workers = max(1, configured_workers)
     extraction_started = time.perf_counter()
     futures = {}
 
@@ -303,13 +368,24 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         return result, time.perf_counter() - started
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for job in extraction_jobs:
+        for job in submission_jobs:
             futures[executor.submit(_run_typed_extraction, job)] = job
 
         # Log each extraction as soon as it finishes.
         for future in as_completed(futures):
             job = futures[future]
-            extraction, elapsed = future.result()  # preserve existing error behavior
+            try:
+                extraction, elapsed = future.result()
+            except Exception as exc:
+                log.exception("Typed extraction failed for %s; preserving the rest of the package.", job["document_type"])
+                extraction = {
+                    "document_type": job["document_type"],
+                    "fields": {},
+                    "evidence": {},
+                    "unsupported_fields": [],
+                    "extraction_error": str(exc),
+                }
+                elapsed = 0.0
             log.info(
                 "[TIMING] Stage typed extraction %s pages=%s: %.2f s | concurrent_workers=%s",
                 job["document_type"],
@@ -333,6 +409,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         document_pages = job["document_pages"]
         extraction = job["extraction"]
         source_text = job["source_text"]
+        validation_text = job["validation_text"]
         ocr_used = job["ocr_used"]
 
         # Find each value in the source text in code.  The model's own quotes often
@@ -353,6 +430,20 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
             source_text,
             ocr_used=ocr_used,
         )
+
+        # A failed AI extraction must remain visible in the document result,
+        # even though the rest of the package continues through validation.
+        extraction_failed = bool(extraction.get("extraction_error"))
+        if extraction_failed:
+            validation["status"] = "needs_review"
+            warnings = validation.setdefault("warnings", [])
+            error_message = str(extraction.get("extraction_error") or "Unknown extraction error")
+            warnings.insert(
+                0,
+                f"AI extraction failed: {error_message}. "
+                "Review the original PDF and retry extraction."
+            )
+
         log.info(
             "[TIMING] Stage document validation %s: %.2f s",
             document_type,
@@ -391,6 +482,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
             "confidence": document.get("confidence"),
             "fields": extraction["fields"],
             "validation": validation,
+            "extraction_failed": extraction_failed,
             "ocr_used": ocr_used,
             "ocr_review_required": ocr_review_required,
             "ocr_pages_low_confidence": low_confidence_pages,

@@ -99,7 +99,7 @@ def test_grouped_numbers_still_parse():
 def test_joined_table_cells_are_supported_but_invented_values_are_not():
     from pathlib import Path
     from app.evidence import locate_value
-    text = (Path(__file__).parent / "phyto_scan_ocr.txt").read_text()
+    text = (Path(__file__).parent / "phyto_scan_ocr.txt").read_text(encoding="utf-8")
     # columns interleave in OCR text, so the joined value is never contiguous
     joined = "SAGE DRIED LEMON CELERY GUM ARABIC (RESIN) WHEAT GRAIN (MAHALEB) THYME (ORIGANO) HIBISCUS"
     assert locate_value(joined, text, fuzzy=True)

@@ -367,7 +367,8 @@ def validate_document(
         elif field in WEIGHT_FIELDS:
             if not isinstance(value, str) or not re.search(
                 r"(?<![A-Za-z])(?:kgs?|kilograms?|g|grams?|lbs?|pounds?|"
-                r"tonnes?|tons?|mt|t)(?![A-Za-z])",
+                r"tonnes?|tons?|mt|t)(?![A-Za-z])|"
+                r"كجم|كغ|كيلوجرام(?:ات)?|جرام(?:ات)?",
                 value,
                 re.IGNORECASE,
             ):

@@ -94,4 +94,8 @@ def test_pages_are_joined_with_a_real_newline(monkeypatch):
 
     monkeypatch.setattr(main, "validate_document", spy)
     main._analyze_package("x.pdf", b"")
-    assert seen["text"] == "first\nsecond"
+    assert "--- PDF PAGE 1 ---" in seen["text"]
+    assert "--- PDF PAGE 2 ---" in seen["text"]
+    assert "[TESSERACT OCR]" in seen["text"]
+    assert "first" in seen["text"]
+    assert "second" in seen["text"]

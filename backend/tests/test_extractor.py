@@ -66,3 +66,36 @@ def test_truncation_is_not_retried(monkeypatch):
     with pytest.raises(ValueError, match="truncated"):
         de.extract_typed_document("commercial_invoice", [PAGE])
     assert len(calls) == 1
+
+
+def test_packing_list_prompt_explains_arabic_totals_and_rtl_columns(monkeypatch):
+    captured = {}
+
+    def fake(**kw):
+        captured.update(kw)
+        return _reply({"document_type": "packing_list", "fields": {
+            "packing_list_number": None,
+            "invoice_number": None,
+            "exporter_name": "Zohoor Albarryea Herbs",
+            "consignee_name": "BIOPPAM SARL",
+            "goods_description": ["THYME", "SAGE"],
+            "total_quantity": None,
+            "package_count": 1255,
+            "package_types": ["BAGS"],
+            "total_net_weight": "27500 KG",
+            "total_gross_weight": "27667 KG",
+            "country_of_origin": None,
+        }})
+
+    monkeypatch.setattr(de, "create_with_retry", fake)
+    page = {"page": 7, "text": "الإجمالي 1255 27500 27667 الوزن الصافي الوزن القائم"}
+    out = de.extract_typed_document("packing_list", [page])
+    prompt = captured["messages"][0]["content"]
+
+    assert "الوزن القائم" in prompt
+    assert "الوزن الصافي" in prompt
+    assert "الأعداد" in prompt
+    assert "right-to-left" in prompt
+    assert out["fields"]["package_count"] == 1255
+    assert out["fields"]["total_net_weight"] == "27500 KG"
+    assert out["fields"]["total_gross_weight"] == "27667 KG"
