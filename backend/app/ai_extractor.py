@@ -108,6 +108,18 @@ MAX_TOKEN_CAP = int(os.getenv("AI_MAX_TOKEN_CAP", "32000"))
 log = logging.getLogger(__name__)
 
 
+def reasoning_extra_body() -> dict:
+    """Optional OpenRouter reasoning configuration controlled by AI_REASONING."""
+    if AI_PROVIDER != "openrouter":
+        return {}
+    mode = os.getenv("AI_REASONING", "off").strip().lower()
+    if mode in ("", "off", "false", "0", "disabled"):
+        return {"reasoning": {"enabled": False}}
+    if mode in ("low", "medium", "high"):
+        return {"reasoning": {"effort": mode}}
+    return {}
+
+
 def create_with_retry(**kwargs):
     """chat.completions.create that retries when the output hit the token limit.
 
@@ -124,11 +136,26 @@ def create_with_retry(**kwargs):
         attempt += 1
         kwargs["max_tokens"] = budget
         attempt_started = time.perf_counter()
+        # Apply provider-specific reasoning options unless the caller supplied them.
+        if "extra_body" not in kwargs:
+            extra = reasoning_extra_body()
+            if extra:
+                kwargs["extra_body"] = extra
         try:
             response = client.chat.completions.create(**kwargs)
-        except Exception:
-            log.exception("[TIMING] AI provider request failed | provider=%s | model=%s | attempt=%s | elapsed=%.2f s", AI_PROVIDER, kwargs.get("model", model), attempt, time.perf_counter() - attempt_started)
-            raise
+        except Exception as exc:
+            # Some OpenAI-compatible providers/models reject OpenRouter's reasoning
+            # extension. Retry once without it; preserve every other request option.
+            message = str(exc).lower()
+            if "extra_body" in kwargs and (
+                "reasoning" in message or "unsupported parameter" in message
+            ):
+                kwargs.pop("extra_body", None)
+                log.warning("Provider rejected reasoning options; retrying without extra_body.")
+                response = client.chat.completions.create(**kwargs)
+            else:
+                log.exception("[TIMING] AI provider request failed | provider=%s | model=%s | attempt=%s | elapsed=%.2f s", AI_PROVIDER, kwargs.get("model", model), attempt, time.perf_counter() - attempt_started)
+                raise
         finish_reason = response.choices[0].finish_reason if response.choices else "no_choices"
         log.info("[TIMING] AI provider request | provider=%s | model=%s | attempt=%s | %.2f s | finish_reason=%s | max_tokens=%s", AI_PROVIDER, kwargs.get("model", model), attempt, time.perf_counter() - attempt_started, finish_reason, budget)
 

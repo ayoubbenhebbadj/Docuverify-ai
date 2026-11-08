@@ -1,0 +1,18 @@
+* [33m2734f3f[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfix-api-import[m[33m)[m Working baseline before MVP delivery
+* [33me31859a[m[33m ([m[1;31morigin/fix-api-import[m[33m)[m Remove placeholder import in api.ts
+[31m|[m * [33mf92040d[m[33m ([m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m)[m Remove unused import statement in api.ts
+[31m|[m[31m/[m  
+*   [33m341ada4[m[33m ([m[1;32mmain[m[33m)[m Merge pull request #1 from ayoubbenhebbadj/fixes-and-deploy
+[33m|[m[34m\[m  
+[33m|[m * [33mf3087d3[m[33m ([m[1;31morigin/fixes-and-deploy[m[33m, [m[1;32mfixes-and-deploy[m[33m)[m render.yaml: explicit docker paths
+[33m|[m * [33m3551cb3[m Arabic OCR, evidence matching, name matching fixes; add deployment files
+[33m|[m[33m/[m  
+* [33m36c2a43[m Update project to latest local version
+* [33mee850d1[m Exclude frontend tests from production build
+* [33mf6d3f3f[m Fix production API URL and CORS configuration
+* [33ma812e62[m Rename dockerfile to Dockerfile
+* [33m51bcdea[m Add Dockerfile for Python app with Tesseract OCR
+* [33mdec37d1[m Add English/French language toggle and interactive processing motions
+* [33m0125f21[m novmber commit
+* [33m36ca7e9[m Update DocuVerify AI: OCR enhancements, vision OCR fallback, validator improvements, and UI cleanup
+* [33mbf79e4f[m Mise à jour du projet docuverify-ai

@@ -67,75 +67,95 @@ def classify_document_pages(pages: list[dict]) -> dict:
     if not pages:
         raise ValueError("No PDF pages were supplied for classification.")
 
-    page_texts = []
+    title_hints = [
+        ("phytosanitary_certificate", re.compile(r"phytosanitary\s+certificate", re.I)),
+        ("certificate_of_origin", re.compile(r"certificate\s+of\s+origin|(?<![\u0600-\u06ff])شهادة\s*م[نت]ش[أاء]", re.I)),
+        ("certificate_of_conformity", re.compile(r"certificate\s+of\s+conformity|(?<![\u0600-\u06ff])شهادة\s*مطابقة", re.I)),
+        ("certificate_of_quality", re.compile(r"quality\s+certificate|certificate\s+of\s+quality", re.I)),
+        ("fumigation_certificate", re.compile(r"fumigation\s+certificate", re.I)),
+        ("bill_of_lading", re.compile(r"bill\s+of\s+lading", re.I)),
+        ("packing_list", re.compile(r"packing\s+list|(?<![\u0600-\u06ff])بيان\s*عبوة", re.I)),
+        ("commercial_invoice", re.compile(r"commercial\s+invoice", re.I)),
+    ]
 
+    # Resolve distinctive titles locally before paying for an AI classification call.
+    preclassified = {}
+    undecided_pages = []
     for page in pages:
-        page_number = page["page"]
-        text = page.get("text", "").strip()
+        number = page["page"]
+        text = (page.get("text") or "") + "\n" + (page.get("native_title_text") or "")
+        match_type = next((kind for kind, pattern in title_hints if pattern.search(text)), None)
+        if match_type:
+            preclassified[number] = {
+                "page": number, "document_type": match_type,
+                "starts_new_document": True, "confidence": 0.90,
+                "evidence": f"Distinctive document title matched: {match_type}.",
+            }
+        elif not text.strip():
+            preclassified[number] = {
+                "page": number, "document_type": "unknown",
+                "starts_new_document": True, "confidence": 0,
+                "evidence": "No readable text on page.",
+            }
+        else:
+            undecided_pages.append(page)
 
-        page_texts.append(
-            f"--- PAGE {page_number} ---\n"
-            f"{text[:850] if text else '[NO READABLE TEXT]'}"
+    returned = {}
+    if undecided_pages:
+        context_lines = []
+        for number, item in preclassified.items():
+            if item["document_type"] != "unknown":
+                context_lines.append(
+                    f"Page {number} already identified by title as: {item['document_type']}."
+                )
+        page_texts = [
+            f"--- PAGE {page['page']} ---\n"
+            f"{(page.get('text') or '[NO READABLE TEXT]')[:850]}"
+            for page in undecided_pages
+        ]
+        user_content = "Classify these undecided PDF pages:\n\n"
+        if context_lines:
+            user_content += "Known document context (do not reclassify these pages):\n"
+            user_content += "\n".join(context_lines) + "\n\n"
+        user_content += "\n\n".join(page_texts)
+
+        response = create_with_retry(
+            model=model,
+            messages=[
+                {"role": "system", "content": CLASSIFICATION_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_tokens=min(8000, 1200 + 140 * len(undecided_pages)),
         )
-
-    response = create_with_retry(
-        model=model,
-        messages=[
-            {"role": "system", "content": CLASSIFICATION_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    "Classify these PDF pages:\n\n"
-                    + "\n\n".join(page_texts)
-                ),
-            },
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
-        # Concise evidence keeps the JSON response smaller while allowing one
-        # classification per page. Increase this if your provider truncates output.
-        max_tokens=min(8000, 1200 + 140 * len(pages)),
-    )
-
-    choice = response.choices[0]
-    content = choice.message.content
-
-    if not content or not content.strip():
-        raise ValueError(
-            "The AI returned no visible classification. "
-            f"Finish reason: {choice.finish_reason}"
-        )
-
-    try:
-        result = parse_json_content(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "The AI returned invalid JSON for page classification."
-        ) from exc
-
-    if not isinstance(result, dict) or not isinstance(
-        result.get("pages"), list
-    ):
-        raise ValueError("The AI classification response has an invalid format.")
+        choice = response.choices[0]
+        content = choice.message.content
+        if not content or not content.strip():
+            raise ValueError(
+                "The AI returned no visible classification. "
+                f"Finish reason: {choice.finish_reason}"
+            )
+        try:
+            result = parse_json_content(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("The AI returned invalid JSON for page classification.") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("pages"), list):
+            raise ValueError("The AI classification response has an invalid format.")
+        for item in result["pages"]:
+            if isinstance(item, dict):
+                try:
+                    returned[int(item.get("page"))] = item
+                except (TypeError, ValueError):
+                    continue
 
     expected_numbers = [page["page"] for page in pages]
 
-    # Index what the model returned by page number.  A missing or malformed
-    # entry becomes "unknown" for that page instead of failing the whole run.
-    returned = {}
-    for item in result["pages"]:
-        if not isinstance(item, dict):
-            continue
-        try:
-            returned[int(item.get("page"))] = item
-        except (TypeError, ValueError):
-            continue
-
-    if not returned:
+    if not returned and not preclassified:
         raise ValueError("The AI classification contained no usable pages.")
 
     classifications = [
-        returned.get(number, {
+        preclassified.get(number) or returned.get(number, {
             "page": number,
             "document_type": "unknown",
             "starts_new_document": True,
@@ -186,29 +206,6 @@ def classify_document_pages(pages: list[dict]) -> dict:
 
     # Deterministic title hints correct obvious page-level misses, especially
     # when OCR is imperfect. Match distinctive titles, not generic references.
-    title_hints = [
-        ("phytosanitary_certificate", re.compile(r"phytosanitary\s+certificate", re.I)),
-        ("certificate_of_origin", re.compile(r"certificate\s+of\s+origin|(?<![\u0600-\u06ff])شهادة\s*م[نت]ش[أاء]", re.I)),
-        ("certificate_of_conformity", re.compile(r"certificate\s+of\s+conformity|(?<![\u0600-\u06ff])شهادة\s*مطابقة", re.I)),
-        ("certificate_of_quality", re.compile(r"quality\s+certificate|certificate\s+of\s+quality", re.I)),
-        ("fumigation_certificate", re.compile(r"fumigation\s+certificate", re.I)),
-        ("bill_of_lading", re.compile(r"bill\s+of\s+lading", re.I)),
-        ("packing_list", re.compile(r"packing\s+list|(?<![\u0600-\u06ff])بيان\s*عبوة", re.I)),
-        ("commercial_invoice", re.compile(r"commercial\s+invoice", re.I)),
-    ]
-    for item in normalized_pages:
-        page_text = page_text_by_number.get(item["page"], "")
-        # OCR can garble a bold/underlined Arabic heading that the PDF's own
-        # text layer still holds correctly, so match the native title too.
-        page_text += "\n" + native_title_by_number.get(item["page"], "")
-        for hinted_type, pattern in title_hints:
-            if pattern.search(page_text):
-                item["document_type"] = hinted_type
-                item["starts_new_document"] = True
-                item["confidence"] = max(item["confidence"], 0.90)
-                item["evidence"] = f"Distinctive document title matched: {hinted_type}."
-                break
-
     # Recover short footer/separator pages when their identifiers
     # clearly match the preceding classified document.
 
@@ -309,9 +306,13 @@ def classify_document_pages(pages: list[dict]) -> dict:
         and page_text_by_number.get(item["page"], "").strip()
     ]
 
+    recognized_document_count = sum(
+        1 for doc in documents if doc["document_type"] != "unknown"
+    )
+
     return {
         "page_count": len(pages),
-        "documents_found": len(documents),
+        "documents_found": recognized_document_count,
         "documents": documents,
         "missing_documents": missing_documents,
         "unclassified_pages": unclassified_pages,

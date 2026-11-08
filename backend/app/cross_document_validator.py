@@ -380,16 +380,23 @@ def validate_cross_documents(documents):
         doc.get("document_type"): (doc.get("fields") or {})
         for doc in documents
     }
+    unsupported_by_type = {
+        doc.get("document_type"): set(doc.get("unsupported_fields") or [])
+        for doc in documents
+    }
 
     checks = []
 
-    def add_check(name, values, status, message):
-        checks.append({
+    def add_check(name, values, status, message, ignored=None):
+        item = {
             "check": name,
             "status": status,
             "values": values,
             "message": message,
-        })
+        }
+        if ignored:
+            item["ignored"] = ignored
+        checks.append(item)
 
     def _label(doc_type):
         return str(doc_type).replace("_", " ").capitalize()
@@ -542,14 +549,27 @@ def validate_cross_documents(documents):
     ]
 
     weights = {}
+    ignored_gross = []
     for doc_type, field_name in weight_sources:
+        if field_name in unsupported_by_type.get(doc_type, set()):
+            ignored_gross.append(doc_type)
+            continue
         value = by_type.get(doc_type, {}).get(field_name)
         if value is not None:
             parsed = parse_weight_kg(value)
             if parsed is not None:
                 weights[doc_type] = parsed
 
-    if len(weights) < 2:
+    if ignored_gross:
+        ignored_labels = ", ".join(_label(d) for d in ignored_gross)
+        add_check(
+            "Gross weight",
+            weights,
+            "needs_review",
+            f"{ignored_labels}: gross weight was not found in the document and was excluded from comparison.",
+            ignored=ignored_gross,
+        )
+    elif len(weights) < 2:
         add_check(
             "Gross weight", weights, "needs_review",
             "Not enough readable gross weights to compare."
