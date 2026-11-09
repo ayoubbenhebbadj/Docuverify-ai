@@ -52,7 +52,7 @@ class FakeOcr:
                 self.active -= 1
 
 
-def test_pages_keep_their_order_and_run_in_parallel(monkeypatch):
+def test_pages_keep_their_order_and_run_sequentially(monkeypatch):
     fake = FakeOcr()
     monkeypatch.setattr(pdf_reader, "ocr_image", fake)
     monkeypatch.setenv("OCR_WORKERS", "3")
@@ -64,8 +64,8 @@ def test_pages_keep_their_order_and_run_in_parallel(monkeypatch):
     assert [p["page"] for p in result["pages"]] == [1, 2, 3, 4, 5, 6]
     assert [p["ocr_used"] for p in result["pages"]] == [True, True, True, False, True, True]
     assert result["pages"][3]["text"].startswith("NATIVE TEXT PAGE 4")
-    assert fake.peak == 3                       # really parallel, capped at OCR_WORKERS
-    assert elapsed < 5 * 0.15 * 0.9             # sequential would be >= 0.75 s
+    assert fake.peak == 1                       # one full-resolution page at a time
+    assert elapsed >= 5 * 0.15                  # OCR is deliberately sequential
     assert result["has_text"] and result["pages_needing_ocr"] == []
 
 

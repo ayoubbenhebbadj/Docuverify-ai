@@ -2,6 +2,7 @@ import logging
 import os
 import traceback
 import time
+import threading
 from fastapi.openapi.utils import get_openapi
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -52,6 +53,10 @@ app.add_middleware(
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per PDF
 MAX_PACKAGE_SIZE = 30 * 1024 * 1024  # 30 MB total for multiple PDFs
+
+# A single 512 MB Render instance should not run two full package pipelines
+# at the same time. Typed extraction still uses its configured internal workers.
+_PACKAGE_ANALYSIS_LOCK = threading.Lock()
 
 
 def _language_warnings() -> list[str]:
@@ -542,7 +547,7 @@ async def analyze_package(file: UploadFile = File(...)):
     filename, pdf_bytes = await read_uploaded_pdf(file)
 
     try:
-        return await run_in_threadpool(_analyze_package, filename, pdf_bytes)
+        return await run_in_threadpool(_run_package_analysis, filename, pdf_bytes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -620,7 +625,7 @@ async def analyze_package_multiple(files: list[UploadFile] = File(...)):
         merged_bytes = await run_in_threadpool(_merge_pdf_files, uploaded)
         source_names = [name for name, _ in uploaded]
         display_name = f"{len(source_names)} uploaded file(s)"
-        result = await run_in_threadpool(_analyze_package, display_name, merged_bytes)
+        result = await run_in_threadpool(_run_package_analysis, display_name, merged_bytes)
         result["source_files"] = source_names
         result["converted_files"] = [
             name for name, _ in uploaded if os.path.splitext(name)[1].lower() != ".pdf"
@@ -632,6 +637,12 @@ async def analyze_package_multiple(files: list[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise _handle_unexpected("multiple-file package analysis", exc) from exc
+
+
+def _run_package_analysis(filename: str, pdf_bytes: bytes) -> dict:
+    """Serialize package pipelines to cap per-instance peak memory."""
+    with _PACKAGE_ANALYSIS_LOCK:
+        return _analyze_package(filename, pdf_bytes)
 
 
 def _classify(pdf_bytes: bytes, filename: str) -> dict:
