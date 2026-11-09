@@ -4,8 +4,9 @@ import { CheckCircle2, AlertTriangle, XCircle, Printer, RotateCcw } from 'lucide
 import { useAnalysis } from '../state/AnalysisContext'
 import { useLanguage } from '../state/LanguageContext'
 import { isOcr, type DocumentResult } from '../types'
-import { REQUIRED_DOCS, pageRange, titleCase } from '../constants'
+import { REQUIRED_DOCS, pageRange } from '../constants'
 import { Badge, Btn, Card, PageHeader, StatusBadge, Value } from '../components/ui'
+import { fieldLabel, translateResultText } from '../i18n/resultTranslations'
 
 const Stat = ({
   label,
@@ -25,7 +26,7 @@ const Stat = ({
 
 export default function Results() {
   const { state } = useAnalysis()
-  const { t, docLabel } = useLanguage()
+  const { t, docLabel, language } = useLanguage()
   const nav = useNavigate()
   const r = state.result
   const [openKey, setOpenKey] = useState('')
@@ -84,7 +85,7 @@ export default function Results() {
           </div>
           <p className="font-semibold text-slate-900">{t.results.ocrNeedsTitle(r.page_count)}</p>
           <p className="mt-1.5 text-sm leading-relaxed text-slate-700">
-            {t.results.ocrNeedsBody(r.message)}
+            {t.results.ocrNeedsBody(translateResultText(r.message, language))}
           </p>
         </Card>
       </>
@@ -119,7 +120,7 @@ export default function Results() {
       : ([
           'border-amber-200 bg-amber-50 text-amber-950',
           AlertTriangle,
-          knownOk ? t.results.bannerReview : t.results.bannerUnknown(r.status),
+          knownOk ? t.results.bannerReview : t.results.bannerUnknown(translateResultText(r.status, language)),
         ] as const)
 
   const BannerIcon = banner[1]
@@ -136,10 +137,10 @@ export default function Results() {
     ),
     ...checks
       .filter((c) => c.status === 'mismatch')
-      .map((c) => t.results.stepsGeneration.mismatchCheck(c.check)),
+      .map((c) => t.results.stepsGeneration.mismatchCheck(translateResultText(c.check, language))),
     ...checks
       .filter((c) => c.status === 'needs_review')
-      .map((c) => t.results.stepsGeneration.reviewCheck(c.check, c.message)),
+      .map((c) => t.results.stepsGeneration.reviewCheck(translateResultText(c.check, language), translateResultText(c.message, language))),
   ]
 
   return (
@@ -197,7 +198,7 @@ export default function Results() {
           </p>
           {(ocr.errors?.length ?? 0) > 0 && (
             <p className="mt-1 text-xs text-red-700 font-medium">
-              {t.results.ocrProblems}: {ocr.errors!.join('; ')}
+              {t.results.ocrProblems}: {ocr.errors!.map((error) => translateResultText(error, language)).join('; ')}
             </p>
           )}
         </div>
@@ -314,7 +315,7 @@ export default function Results() {
                   <span className="text-xs text-slate-500 font-mono">
                     {t.results.extractedDocs.pages} {pageRange(d.pages ?? [])}
                   </span>
-                  {d.ocr_used && <Badge tone={d.ocr_review_required ? 'amber' : 'blue'}>OCR</Badge>}
+                  {d.ocr_used && <Badge tone={d.ocr_review_required ? 'amber' : 'blue'}>{language === 'fr' ? 'ROC' : 'OCR'}</Badge>}
                   {typeof d.confidence === 'number' && (
                     <Badge tone="gray">
                       {t.results.extractedDocs.classifiedWith(d.confidence)}
@@ -329,7 +330,7 @@ export default function Results() {
                       <p className="font-bold text-red-800">
                         {t.results.extractedDocs.missingFields}
                       </p>
-                      <p className="text-xs text-slate-700">{v!.missing_fields.map(titleCase).join(', ')}</p>
+                      <p className="text-xs text-slate-700">{v!.missing_fields.map((field) => fieldLabel(field, language)).join(', ')}</p>
                     </div>
                   )}
 
@@ -341,7 +342,7 @@ export default function Results() {
                       <ul className="list-disc pl-5 text-xs text-slate-700">
                         {v!.invalid_fields.map((f) => (
                           <li key={f.field}>
-                            <b>{titleCase(f.field)}</b>: {f.reason}
+                            <b>{fieldLabel(f.field, language)}</b>: {translateResultText(f.reason, language)}
                           </li>
                         ))}
                       </ul>
@@ -353,7 +354,7 @@ export default function Results() {
                       <p className="font-bold text-amber-800">
                         {t.results.extractedDocs.unsupportedEvidence}
                       </p>
-                      <p className="text-xs text-slate-700">{v!.unsupported_evidence.map(titleCase).join(', ')}</p>
+                      <p className="text-xs text-slate-700">{v!.unsupported_evidence.map((field) => fieldLabel(field, language)).join(', ')}</p>
                       <p className="mt-0.5 text-xs text-slate-500">
                         {t.results.extractedDocs.unsupportedNote}
                       </p>
@@ -367,7 +368,7 @@ export default function Results() {
                       </p>
                       <ul className="list-disc pl-5 text-xs text-slate-700">
                         {v!.warnings.map((w) => (
-                          <li key={w}>{w}</li>
+                          <li key={w}>{translateResultText(w, language)}</li>
                         ))}
                       </ul>
                     </div>
@@ -376,7 +377,7 @@ export default function Results() {
                   <dl className="grid gap-x-6 gap-y-2.5 sm:grid-cols-2 pt-2 border-t border-slate-100">
                     {Object.entries(d.fields ?? {}).map(([f, val]) => (
                       <div key={f} className="border-b border-slate-50 pb-2">
-                        <dt className="text-xs font-medium text-slate-500">{titleCase(f)}</dt>
+                        <dt className="text-xs font-medium text-slate-500">{fieldLabel(f, language)}</dt>
                         <dd className="break-words text-sm font-semibold text-slate-900">
                           <Value v={val} />
                         </dd>
@@ -416,7 +417,7 @@ export default function Results() {
                       c.status === 'mismatch' ? 'bg-red-50/50' : ''
                     }`}
                   >
-                    <td className="px-4 py-3 font-semibold text-slate-900">{c.check}</td>
+                    <td className="px-4 py-3 font-semibold text-slate-900">{translateResultText(c.check, language)}</td>
                     <td className="px-4 py-3">
                       <StatusBadge status={c.status} />
                     </td>
@@ -436,7 +437,7 @@ export default function Results() {
                         </dl>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-xs leading-relaxed text-slate-700">{c.message}</td>
+                    <td className="px-4 py-3 text-xs leading-relaxed text-slate-700">{translateResultText(c.message, language)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -465,7 +466,7 @@ export default function Results() {
           </p>
           <p>
             <b>{t.results.report.mismatches}</b>{' '}
-            {checks.filter((c) => c.status === 'mismatch').map((c) => c.check).join(', ') ||
+            {checks.filter((c) => c.status === 'mismatch').map((c) => translateResultText(c.check, language)).join(', ') ||
               t.results.report.none}
           </p>
           <div className="pt-1">
