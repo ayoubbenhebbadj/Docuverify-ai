@@ -2,7 +2,6 @@ import logging
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pymupdf as fitz
 
@@ -122,102 +121,61 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
             pages = []
             ocr_errors = []
 
-            # Render page pixels before launching workers: PyMuPDF page objects
-            # stay on this thread, while independent Tesseract jobs run in parallel.
-            ocr_inputs = {}
-            for page_number, page in enumerate(document, start=1):
-                native = page.get_text("text").strip()
-                if page_needs_ocr(page, native):
-                    try:
-                        ocr_inputs[page_number] = _page_image(page)
-                    except Exception as exc:
-                        ocr_errors.append(f"page {page_number}: {exc}")
-
-            ocr_results = {}
-            if ocr_inputs:
-                with ThreadPoolExecutor(max_workers=min(_ocr_workers(), len(ocr_inputs))) as pool:
-                    futures = {
-                        pool.submit(ocr_image, image, dpi): page_number
-                        for page_number, (image, dpi) in ocr_inputs.items()
-                    }
-                    for future in as_completed(futures):
-                        page_number = futures[future]
-                        try:
-                            ocr_results[page_number] = future.result()
-                        except Exception as exc:
-                            ocr_results[page_number] = exc
-
+            # Process one page at a time. Rendering every scanned page before OCR
+            # kept several full-resolution arrays alive simultaneously and could
+            # exceed small container memory limits. This keeps OCR quality and
+            # result structure unchanged while bounding peak image memory to one page.
             for page_number, page in enumerate(document, start=1):
                 native_text = page.get_text("text").strip()
-
                 needs_ocr = page_needs_ocr(page, native_text)
-                
+                coverage = _image_coverage(page)
+
                 page_result = {
                     "page": page_number,
-
-                    # Keep the original PDF text unchanged.
                     "native_text": native_text,
-
-                    # Keep OCR and vision results as separate sources.
                     "ocr_text": "",
                     "vision_text": "",
-
-                    # Existing primary text field for compatibility.
                     "text": native_text,
-
                     "ocr_used": False,
                     "ocr_confidence": None,
                     "ocr_word_count": 0,
                     "ocr_low_confidence": False,
                     "needs_ocr": needs_ocr,
-                    "image_coverage": round(_image_coverage(page), 3),
+                    "image_coverage": round(coverage, 3),
                     "native_text_length": len(native_text),
                 }
 
-
                 if needs_ocr:
                     page_ocr_started = time.perf_counter()
+                    image = None
                     try:
-                        precomputed = ocr_results.get(page_number)
-                        if isinstance(precomputed, Exception):
-                            raise precomputed
-                        ocr_result = precomputed or {
-                            "text": "", "ocr_used": True, "ocr_confidence": None,
-                            "ocr_word_count": 0, "ocr_low_confidence": False,
-                            "ocr_sparse": True, "ocr_blank": True, "ocr_details": {},
-                        }
+                        image, dpi = _page_image(page)
+                        ocr_result = ocr_image(image, dpi)
                     except Exception as exc:  # keep processing other pages
                         log.exception("OCR failed on page %s", page_number)
-                        log.info("[TIMING] Tesseract page %s FAILED after %.2f s", page_number, time.perf_counter() - page_ocr_started)
+                        log.info(
+                            "[TIMING] Tesseract page %s FAILED after %.2f s",
+                            page_number, time.perf_counter() - page_ocr_started,
+                        )
                         ocr_errors.append(f"page {page_number}: {exc}")
                         page_result["ocr_error"] = str(exc)
                     else:
-                        # Preserve the original Tesseract result before merging anything.
                         ocr_text = ocr_result.get("text", "")
-
                         page_result["ocr_text"] = ocr_text
 
                         broken_layer = has_broken_arabic_layer(native_text)
                         page_result["broken_arabic_text_layer"] = broken_layer
 
                         text = ocr_text
-                        # Arabic in a broken layer is garbage, but its Latin lines
-                        # (company names, e-mails, numbers) are exact: keep only those.
                         if native_text:
                             text = _merge_native_text(native_text, text, latin_only=broken_layer)
 
-                        # Keep the PDF's own first lines: a clean title there helps classification.
                         page_result.update(ocr_result)
-
-                        # Restore source-specific values after update(), because OCR results
-                        # also contain a "text" field.
                         page_result["page"] = page_number
                         page_result["native_text"] = native_text
                         page_result["native_title_text"] = native_text[:2000]
                         page_result["ocr_text"] = ocr_text
                         page_result["text"] = text
-                        # A truly blank page is not an OCR failure and should
-                        # not be sent for another OCR attempt.
                         page_result["needs_ocr"] = (
                             not bool(text.strip())
                             and not bool(ocr_result.get("ocr_blank", False))
@@ -228,6 +186,11 @@ def extract_pdf_text(pdf_bytes: bytes) -> dict:
                             page_result.get("ocr_confidence"), page_result.get("ocr_word_count"),
                             ",".join((page_result.get("ocr_details") or {}).get("passes", [])),
                         )
+                    finally:
+                        # Explicitly release the largest temporary object before
+                        # rendering the next page. NumPy/OpenCV may retain allocator
+                        # arenas, but no page image remains referenced by this loop.
+                        del image
 
                 pages.append(page_result)
 

@@ -36,19 +36,18 @@ def _image_to_pdf(data: bytes, filename: str) -> bytes:
     try:
         with Image.open(io.BytesIO(data)) as image:
             image.verify()
+        # Embed the original validated image stream directly. Re-encoding it
+        # through RGB + PNG created multiple full-resolution copies in RAM and
+        # could also increase conversion time. PyMuPDF supports JPEG and PNG
+        # streams directly, preserving their original image quality.
         with Image.open(io.BytesIO(data)) as image:
             if image.width < 1 or image.height < 1:
                 raise ValueError("empty image")
-            # Normalize color mode; Pillow can then encode all supported inputs safely.
-            image = image.convert("RGB")
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG")
-            png_bytes = buffer.getvalue()
         doc = fitz.open()
         try:
             page = doc.new_page(width=595, height=842)
             rect = fitz.Rect(0, 0, 595, 842)
-            page.insert_image(rect, stream=png_bytes, keep_proportion=True, overlay=True)
+            page.insert_image(rect, stream=data, keep_proportion=True, overlay=True)
             return doc.tobytes(garbage=3, deflate=True)
         finally:
             doc.close()
