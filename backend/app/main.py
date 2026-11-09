@@ -2,10 +2,11 @@ import logging
 import os
 import traceback
 import time
-
+from fastapi.openapi.utils import get_openapi
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
+import pymupdf as fitz
 
 from app.ai_extractor import extract_document_fields
 from app.cross_document_validator import validate_cross_documents
@@ -16,6 +17,7 @@ from app.document_extractor import extract_typed_document
 from app.evidence import build_evidence
 from app.document_validator import validate_document
 from app.pdf_reader import extract_pdf_text
+from app.file_converter import convert_upload_to_pdf, MAX_FILE_SIZE as MAX_MIXED_FILE_SIZE, SUPPORTED_EXTENSIONS
 from app.vision_ocr import recover_uncertain_pages
 from app.validator import validate_document as validate_invoice_fields
 
@@ -48,7 +50,8 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per PDF
+MAX_PACKAGE_SIZE = 30 * 1024 * 1024  # 30 MB total for multiple PDFs
 
 
 def _language_warnings() -> list[str]:
@@ -546,6 +549,91 @@ async def analyze_package(file: UploadFile = File(...)):
         raise _handle_unexpected("package analysis", exc) from exc
 
 
+def _merge_pdf_files(pdf_files: list[tuple[str, bytes]]) -> bytes:
+    """Merge validated PDF byte streams in memory, preserving upload order."""
+    merged = fitz.open()
+    try:
+        for filename, content in pdf_files:
+            try:
+                with fitz.open(stream=content, filetype="pdf") as source:
+                    if source.needs_pass:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{filename}: This PDF is password-protected.",
+                        )
+                    if len(source) == 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{filename}: The PDF contains no pages.",
+                        )
+                    merged.insert_pdf(source)
+            except fitz.FileDataError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{filename}: The file is not a valid or readable PDF.",
+                ) from exc
+
+        if len(merged) == 0:
+            raise HTTPException(status_code=400, detail="No PDF pages were uploaded.")
+
+        return merged.tobytes(garbage=3, deflate=True)
+    finally:
+        merged.close()
+
+
+@app.post("/api/documents/analyze-package-multiple")
+async def analyze_package_multiple(files: list[UploadFile] = File(...)):
+    """Convert mixed uploads to PDF, merge in memory, then run the unchanged package pipeline."""
+    if not files:
+        raise HTTPException(status_code=400, detail="Please upload at least one supported file.")
+
+    uploaded: list[tuple[str, bytes]] = []
+    total_size = 0
+    for file in files:
+        filename = file.filename or "unnamed"
+        try:
+            extension = os.path.splitext(filename)[1].lower()
+            if extension not in SUPPORTED_EXTENSIONS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{filename}: Unsupported format. Upload PDF, DOCX, DOC, JPG, JPEG or PNG.",
+                )
+            content = await file.read(MAX_MIXED_FILE_SIZE + 1)
+            await file.close()
+            if len(content) > MAX_MIXED_FILE_SIZE:
+                raise HTTPException(status_code=413, detail=f"{filename}: File exceeds the 10 MB per-file limit.")
+            total_size += len(content)
+            if total_size > MAX_PACKAGE_SIZE:
+                raise HTTPException(status_code=413, detail="The combined uploads exceed the 30 MB package limit.")
+            pdf_content = await run_in_threadpool(convert_upload_to_pdf, filename, content)
+            uploaded.append((filename, pdf_content))
+        except HTTPException:
+            raise
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise _handle_unexpected(f"file conversion ({filename})", exc) from exc
+
+    try:
+        merged_bytes = await run_in_threadpool(_merge_pdf_files, uploaded)
+        source_names = [name for name, _ in uploaded]
+        display_name = f"{len(source_names)} uploaded file(s)"
+        result = await run_in_threadpool(_analyze_package, display_name, merged_bytes)
+        result["source_files"] = source_names
+        result["converted_files"] = [
+            name for name, _ in uploaded if os.path.splitext(name)[1].lower() != ".pdf"
+        ]
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise _handle_unexpected("multiple-file package analysis", exc) from exc
+
+
 def _classify(pdf_bytes: bytes, filename: str) -> dict:
     pdf_data = extract_pdf_text(pdf_bytes)
     pdf_data = recover_uncertain_pages(pdf_bytes, pdf_data)
@@ -580,3 +668,32 @@ async def classify_documents(file: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise _handle_unexpected("document classification", exc) from exc
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    schema_name = (
+        "Body_analyze_package_multiple_api_documents_analyze_package_multiple_post"
+    )
+
+    files_schema = (
+        openapi_schema["components"]["schemas"]
+        [schema_name]["properties"]["files"]
+    )
+
+    files_schema["items"]["format"] = "binary"
+    files_schema["items"].pop("contentMediaType", None)
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi

@@ -42,10 +42,14 @@ export interface TranslationDictionary {
     analyzingBtn: string
     retryBtn: string
     selectPdfHint: string
+    selectedFiles: (count: number) => string
+    addMore: string
+    clearAll: string
     validation: {
       notPdf: string
       empty: string
       tooLarge: (size: string) => string
+      packageTooLarge: (size: string) => string
     }
   }
   processing: {
@@ -174,7 +178,7 @@ export const translations: Record<Language, TranslationDictionary> = {
       overview: 'Overview',
       overviewDesc: 'How verification works and backend status.',
       newAnalysis: 'New Analysis',
-      newAnalysisDesc: 'Upload one merged shipment PDF for verification.',
+      newAnalysisDesc: 'Add shipment PDFs as they arrive and scan them together.',
       results: 'Analysis Results',
       resultsDesc: 'Review the report for the most recent analysis.',
       brand: 'DocuVerify AI',
@@ -184,7 +188,7 @@ export const translations: Record<Language, TranslationDictionary> = {
     },
     overview: {
       title: 'Shipment document verification',
-      subtitle: "Merge the exporter's documents into one PDF, upload it, and review what the system found, what is missing, and what does not match.",
+      subtitle: "Add the exporter's PDFs as they arrive, scan the selected files together, and review what is found, missing, or inconsistent.",
       newAnalysisBtn: 'New analysis',
       processHeader: 'What happens to your PDF',
       steps: [
@@ -208,21 +212,25 @@ export const translations: Record<Language, TranslationDictionary> = {
     },
     newAnalysis: {
       title: 'New analysis',
-      subtitle: "Upload one PDF that contains all of the shipment's documents.",
-      tip: 'Merge the exporter’s documents into a single PDF before uploading. Scanned pages are read automatically with OCR (this can take a few seconds per scanned page). Maximum size 10 MB.',
-      dropTitle: 'Choose a PDF',
-      dropSub: 'or drag it here',
-      pdfOnly: 'PDF only',
+      subtitle: 'Add shipment PDFs as they arrive, then scan the files currently selected.',
+      tip: 'Upload one PDF at a time or select several PDFs together. You can add more files after a scan and scan the complete selection again. Maximum 10 MB per file and 30 MB total.',
+      dropTitle: 'Choose PDF files',
+      dropSub: 'or drag them here',
+      pdfOnly: 'PDF files only · multiple selection supported',
       replace: 'Replace',
       remove: 'Remove file',
-      analyzeBtn: 'Analyze package',
-      analyzingBtn: 'Analyzing…',
-      retryBtn: 'Retry analysis',
-      selectPdfHint: 'Select a PDF to enable analysis.',
+      analyzeBtn: 'Scan documents',
+      analyzingBtn: 'Scanning…',
+      retryBtn: 'Retry scan',
+      selectPdfHint: 'Select at least one PDF to enable scanning.',
+      selectedFiles: (count) => `${count} PDF file${count === 1 ? '' : 's'} selected`,
+      addMore: 'Add more files',
+      clearAll: 'Clear all',
       validation: {
         notPdf: 'This is not a PDF. Choose a file ending in .pdf.',
         empty: 'This file is empty.',
-        tooLarge: (size) => `This file is ${size}. The upload limit is 10 MB.`,
+        tooLarge: (size) => `This file is ${size}. The per-file limit is 10 MB.`,
+        packageTooLarge: (size) => `The selected files total ${size}. The package limit is 30 MB.`,
       },
     },
     processing: {
@@ -303,7 +311,7 @@ export const translations: Record<Language, TranslationDictionary> = {
       printReport: 'Print report',
       analyzeAnother: 'Analyze another PDF',
       noResultsTitle: 'No results yet',
-      noResultsText: 'Upload a merged shipment PDF to see its report here.',
+      noResultsText: 'Upload one or more shipment PDFs to see the analysis report here.',
       startNewLink: 'Start a new analysis',
       ocrNeedsTitle: (pages) => `No selectable text was found in this PDF (${pages} page${pages === 1 ? '' : 's'}).`,
       ocrNeedsBody: (msg) => `${msg} No documents were classified or checked. Try a clearer or higher-resolution scan, or ask the exporter for a text-based PDF.`,
@@ -402,7 +410,7 @@ export const translations: Record<Language, TranslationDictionary> = {
       overview: 'Aperçu',
       overviewDesc: 'Fonctionnement de la vérification et état du serveur.',
       newAnalysis: 'Nouvelle analyse',
-      newAnalysisDesc: 'Téléversez un PDF d’expédition groupé pour vérification.',
+      newAnalysisDesc: 'Ajoutez les PDF au fur et à mesure de leur réception et analysez-les ensemble.',
       results: 'Résultats d’analyse',
       resultsDesc: 'Consultez le rapport complet de la dernière analyse.',
       brand: 'DocuVerify AI',
@@ -412,7 +420,7 @@ export const translations: Record<Language, TranslationDictionary> = {
     },
     overview: {
       title: 'Vérification des documents d’expédition',
-      subtitle: 'Regroupez les documents de l’exportateur en un seul PDF, téléversez-le, et découvrez ce que le système a détecté, ce qui manque et les éventuelles discordances.',
+      subtitle: 'Ajoutez les PDF de l’exportateur au fur et à mesure de leur réception, analysez-les ensemble et consultez les documents manquants ou incohérents.',
       newAnalysisBtn: 'Nouvelle analyse',
       processHeader: 'Ce qui se passe avec votre PDF',
       steps: [
@@ -436,21 +444,25 @@ export const translations: Record<Language, TranslationDictionary> = {
     },
     newAnalysis: {
       title: 'Nouvelle analyse',
-      subtitle: 'Téléversez un fichier PDF contenant l’ensemble des documents du dossier d’expédition.',
-      tip: 'Regroupez les documents de l’exportateur dans un seul PDF avant l’envoi. Les pages numérisées sont lues automatiquement par ROC (cela peut prendre quelques secondes par page). Taille maximale : 10 Mo.',
-      dropTitle: 'Choisissez un fichier PDF',
-      dropSub: 'ou glissez-le ici',
-      pdfOnly: 'Format PDF uniquement',
+      subtitle: 'Ajoutez les PDF au fur et à mesure de leur réception, puis analysez les fichiers sélectionnés.',
+      tip: 'Ajoutez un PDF à la fois ou sélectionnez plusieurs fichiers ensemble. Vous pouvez ajouter d’autres fichiers après une analyse et relancer l’analyse de l’ensemble. Maximum : 10 Mo par fichier et 30 Mo au total.',
+      dropTitle: 'Choisir des fichiers PDF',
+      dropSub: 'ou glissez-les ici',
+      pdfOnly: 'Fichiers PDF uniquement · sélection multiple',
       replace: 'Remplacer',
       remove: 'Supprimer le fichier',
-      analyzeBtn: 'Analyser le dossier',
+      analyzeBtn: 'Analyser les documents',
       analyzingBtn: 'Analyse en cours…',
       retryBtn: 'Réessayer l’analyse',
-      selectPdfHint: 'Sélectionnez un fichier PDF pour activer l’analyse.',
+      selectPdfHint: 'Sélectionnez au moins un PDF pour lancer l’analyse.',
+      selectedFiles: (count) => `${count} fichier(s) PDF sélectionné(s)`,
+      addMore: 'Ajouter d’autres fichiers',
+      clearAll: 'Tout supprimer',
       validation: {
         notPdf: 'Ce fichier n’est pas un PDF. Veuillez choisir un fichier se terminant par .pdf.',
         empty: 'Ce fichier est vide.',
-        tooLarge: (size) => `Ce fichier fait ${size}. La taille limite autorisée est de 10 Mo.`,
+        tooLarge: (size) => `Ce fichier fait ${size}. La limite par fichier est de 10 Mo.`,
+        packageTooLarge: (size) => `La taille totale est de ${size}. La limite du dossier est de 30 Mo.`,
       },
     },
     processing: {

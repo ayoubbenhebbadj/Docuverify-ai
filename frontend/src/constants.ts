@@ -4,7 +4,8 @@ export const REQUIRED_DOCS = [
   { id: 'certificate_of_quality', label: 'Certificate of quality' }, { id: 'certificate_of_conformity', label: 'Certificate of conformity' },
   { id: 'phytosanitary_certificate', label: 'Phytosanitary certificate' }, { id: 'fumigation_certificate', label: 'Fumigation certificate' },
 ] as const
-export const MAX_BYTES = 10 * 1024 * 1024 // matches MAX_FILE_SIZE in backend/app/main.py
+export const MAX_BYTES = 10 * 1024 * 1024 // per-file limit; matches backend
+export const MAX_PACKAGE_BYTES = 30 * 1024 * 1024 // total multi-file request limit
 export const titleCase = (s: string) => { const t = s.replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1) }
 export const docLabel = (id: string) => REQUIRED_DOCS.find(d => d.id === id)?.label ?? (id === 'unknown' ? 'Unrecognized pages' : titleCase(id))
 export const fmtSize = (b: number) => b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`

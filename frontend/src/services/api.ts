@@ -80,7 +80,7 @@ function detailOf(body: unknown): string | undefined {
 
 function hintFor(status: number, detail: string): string | undefined {
   const d = detail.toLowerCase()
-  if (status === 413) return 'Reduce the file size (the backend limit is 10 MB) and try again.'
+  if (status === 413) return 'Reduce the file size (the limit is 10 MB per file and 30 MB per package) and try again.'
   if (d.includes('password')) return 'Remove the password protection from the PDF and upload it again.'
   if (
     d.includes('not appear to be a valid pdf') ||
@@ -167,6 +167,40 @@ async function postFile<T = unknown>(
  */
 export async function analyzePackage(file: File, signal?: AbortSignal): Promise<AnalyzeResponse> {
   const json = await postFile<unknown>('/api/documents/analyze-package', file, signal)
+  const r = json as { status?: unknown; filename?: unknown } | null
+  if (!r || typeof r.status !== 'string' || typeof r.filename !== 'string') {
+    throw new ApiError('The backend returned a response in an unexpected format.', 'format')
+  }
+  return json as AnalyzeResponse
+}
+
+
+/**
+ * Uploads several individual PDFs as one temporary shipment package.
+ * FastAPI receives repeated multipart fields named "files".
+ */
+export async function analyzePackageFiles(files: File[], signal?: AbortSignal): Promise<AnalyzeResponse> {
+  if (!files.length) throw new ApiError('Select at least one PDF file.', 'format')
+
+  const body = new FormData()
+  files.forEach((file) => body.append('files', file, file.name))
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE_URL}/api/documents/analyze-package-multiple`, {
+      method: 'POST', body, signal,
+    })
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e
+    throw new ApiError('Could not reach the DocuVerify backend.', 'network',
+      undefined, networkErrorHint(API_BASE_URL))
+  }
+
+  let json: unknown = null
+  try { json = await res.json() } catch { /* non-JSON response */ }
+  if (!res.ok) {
+    const detail = detailOf(json) ?? `The server returned an error (HTTP ${res.status}).`
+    throw new ApiError(detail, 'http', res.status, hintFor(res.status, detail))
+  }
   const r = json as { status?: unknown; filename?: unknown } | null
   if (!r || typeof r.status !== 'string' || typeof r.filename !== 'string') {
     throw new ApiError('The backend returned a response in an unexpected format.', 'format')
