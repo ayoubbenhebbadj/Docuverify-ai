@@ -24,7 +24,7 @@ const Stat = ({
 )
 
 export default function Results() {
-  const { state, reset } = useAnalysis()
+  const { state } = useAnalysis()
   const { t, docLabel } = useLanguage()
   const nav = useNavigate()
   const r = state.result
@@ -43,7 +43,8 @@ export default function Results() {
   }, [])
 
   const again = () => {
-    reset()
+    // Keep the in-memory queue so the employee can add later-arriving PDFs
+    // and rescan the complete temporary package.
     nav('/analysis')
   }
 
@@ -73,7 +74,7 @@ export default function Results() {
           actions={
             <Btn variant="primary" onClick={again}>
               <RotateCcw className="h-4 w-4" />
-              <span>{t.results.analyzeAnother}</span>
+              <span>{t.newAnalysis.addMore}</span>
             </Btn>
           }
         />
@@ -154,7 +155,7 @@ export default function Results() {
             </Btn>
             <Btn variant="primary" onClick={again}>
               <RotateCcw className="h-4 w-4" />
-              <span>{t.results.analyzeAnother}</span>
+              <span>{t.newAnalysis.addMore}</span>
             </Btn>
           </>
         }
