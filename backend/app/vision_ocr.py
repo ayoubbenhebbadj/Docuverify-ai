@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 
 VISION_MODEL = os.getenv("OPENROUTER_VISION_MODEL", "").strip()
 VISION_DPI = int(os.getenv("VISION_OCR_DPI", "180"))
-VISION_MAX_IMAGE_SIDE = int(os.getenv("VISION_OCR_MAX_IMAGE_SIDE", "2200"))
+VISION_MAX_IMAGE_SIDE = int(os.getenv("VISION_OCR_MAX_IMAGE_SIDE", "1600"))
+VISION_JPEG_QUALITY = int(os.getenv("VISION_OCR_JPEG_QUALITY", "75"))
 
 VISION_TRANSCRIPTION_PROMPT = """Transcribe the visible text from this business document.
 
@@ -52,13 +53,28 @@ def _page_data_url(pdf_bytes: bytes, page_number: int) -> str:
         if page_number > len(document):
             raise ValueError(f"PDF has no page {page_number}.")
         page = document[page_number - 1]
-        scale = max(VISION_DPI, 72) / 72
-        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+
+        # Compute scale from target DPI, then clamp the rendered image size
+        # before creating the pixmap.  This avoids allocating a large pixmap
+        # only to downscale it immediately with PIL.
+        target_scale = max(VISION_DPI, 72) / 72
+        width = int(round(page.rect.width * target_scale))
+        height = int(round(page.rect.height * target_scale))
+
+        # If the rendered size exceeds our ceiling, reduce the scale further.
+        long_side = max(width, height)
+        if long_side > VISION_MAX_IMAGE_SIDE:
+            target_scale = target_scale * VISION_MAX_IMAGE_SIDE / long_side
+            width = int(round(page.rect.width * target_scale))
+            height = int(round(page.rect.height * target_scale))
+
+        pix = page.get_pixmap(matrix=fitz.Matrix(target_scale, target_scale), alpha=False)
         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
+    # As a safety net, thumbnail again (should be a no-op for the fast path above).
     image.thumbnail((VISION_MAX_IMAGE_SIDE, VISION_MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
     buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=85, optimize=True)
+    image.save(buffer, format="JPEG", quality=VISION_JPEG_QUALITY, optimize=True)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
 

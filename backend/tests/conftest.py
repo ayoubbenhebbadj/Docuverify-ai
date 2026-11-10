@@ -11,4 +11,11 @@ os.environ.pop("OPENROUTER_VISION_MODEL", None)
 os.environ.pop("AI_REASONING", None)
 os.environ.pop("EXTRACTION_EVIDENCE", None)
 
+# Force English for tests to match expected assertions
+os.environ["LANG"] = "en"
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Set language to English before any app modules are imported
+import app.localization as loc
+loc.set_language("en")

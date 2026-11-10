@@ -3,6 +3,8 @@ import re
 from difflib import SequenceMatcher
 from decimal import Decimal, InvalidOperation
 
+from app.localization import _, get_language, t, cross_doc_check_label, cross_doc_message
+
 
 def normalize(value):
     """Normalize text for reliable comparisons."""
@@ -411,8 +413,8 @@ def validate_cross_documents(documents):
         address_note = ""
         if address_docs:
             address_note = (
-                f"{', '.join(_label(d) for d in address_docs)}: extracted value looks like "
-                "an address, not a company name - check the extraction. "
+                f"{', '.join(_label(d) for d in address_docs)}: "
+                f"{t('address, not a company name - check the extraction.', 'cross_doc_messages')} "
             )
 
         groups = []   # each: list of doc types whose names refer to the same company
@@ -427,23 +429,23 @@ def validate_cross_documents(documents):
 
         if len(usable) < 2:
             add_check(name, values, "needs_review",
-                      (address_note + "Not enough usable names to compare.").strip())
+                      (address_note + t("Not enough usable names to compare.", "cross_doc_messages")).strip())
             return
 
         if len(groups) == 1:
             if address_docs:
                 add_check(name, values, "needs_review", address_note.strip())
             else:
-                add_check(name, values, "passed", "Values match.")
+                add_check(name, values, "passed", t("Values match.", "cross_doc_messages"))
             return
 
         groups.sort(key=len, reverse=True)
         if len(groups[0]) > len(groups[1]):
             odd = [d for g in groups[1:] for d in g]
             detail = "; ".join(f"{_label(d)} ({usable[d]})" for d in odd)
-            message = f"Differs from the majority of documents: {detail}."
+            message = t("Differs from the majority of documents: ", "cross_doc_messages") + detail + "."
         else:
-            message = "Documents disagree: " + " vs ".join(
+            message = t("Documents disagree: ", "cross_doc_messages") + " vs ".join(
                 ", ".join(_label(d) for d in g) for g in groups) + "."
         add_check(name, values, "mismatch", (address_note + message).strip())
 
@@ -460,7 +462,7 @@ def validate_cross_documents(documents):
         if len(values) < 2:
             add_check(
                 name, values, "needs_review",
-                "Not enough documents contain this field to compare."
+                t("Not enough documents contain this field to compare.", "cross_doc_messages")
             )
             return
 
@@ -476,7 +478,7 @@ def validate_cross_documents(documents):
             same = len({normalize(v) for v in raw}) == 1
 
         if same:
-            add_check(name, values, "passed", "Values match.")
+            add_check(name, values, "passed", t("Values match.", "cross_doc_messages"))
             return
 
         key = normalize_identifier if name == "Invoice number" else normalize
@@ -488,9 +490,9 @@ def validate_cross_documents(documents):
             odd = "; ".join(
                 f"{_label(d)} ({values[d]})" for g in ordered[1:] for d in g
             )
-            message = f"Differs from the majority of documents: {odd}."
+            message = t("Differs from the majority of documents: ", "cross_doc_messages") + odd + "."
         else:
-            message = "Documents disagree: " + " vs ".join(
+            message = t("Documents disagree: ", "cross_doc_messages") + " vs ".join(
                 ", ".join(f"{_label(d)} ({values[d]})" for d in g) for g in ordered
             ) + "."
         add_check(name, values, "mismatch", message)
@@ -563,26 +565,26 @@ def validate_cross_documents(documents):
     if ignored_gross:
         ignored_labels = ", ".join(_label(d) for d in ignored_gross)
         add_check(
-            "Gross weight",
+            t("Gross weight", "cross_doc_checks"),
             weights,
             "needs_review",
-            f"{ignored_labels}: gross weight was not found in the document and was excluded from comparison.",
+            f"{ignored_labels}: {t('gross weight was not found in the document and was excluded from comparison.', 'cross_doc_messages')}",
             ignored=ignored_gross,
         )
     elif len(weights) < 2:
         add_check(
-            "Gross weight", weights, "needs_review",
-            "Not enough readable gross weights to compare."
+            t("Gross weight", "cross_doc_checks"), weights, "needs_review",
+            t("Not enough readable gross weights to compare.", "cross_doc_messages")
         )
     elif max(weights.values()) - min(weights.values()) <= Decimal("0.01"):
         add_check(
-            "Gross weight", weights, "passed",
-            "Gross weights agree within 0.01 kg."
+            t("Gross weight", "cross_doc_checks"), weights, "passed",
+            t("Gross weights agree within 0.01 kg.", "cross_doc_messages")
         )
     else:
         add_check(
-            "Gross weight", weights, "mismatch",
-            "Gross weights differ between documents."
+            t("Gross weight", "cross_doc_checks"), weights, "mismatch",
+            t("Gross weights differ between documents.", "cross_doc_messages")
         )
 
     # 5. Net weight
@@ -599,18 +601,18 @@ def validate_cross_documents(documents):
 
     if len(net_weights) < 2:
         add_check(
-            "Net weight", net_weights, "needs_review",
-            "Not enough readable net weights to compare."
+            t("Net weight", "cross_doc_checks"), net_weights, "needs_review",
+            t("Not enough readable net weights to compare.", "cross_doc_messages")
         )
     elif max(net_weights.values()) - min(net_weights.values()) <= Decimal("0.01"):
         add_check(
-            "Net weight", net_weights, "passed",
-            "Net weights agree within 0.01 kg."
+            t("Net weight", "cross_doc_checks"), net_weights, "passed",
+            t("Net weights agree within 0.01 kg.", "cross_doc_messages")
         )
     else:
         add_check(
-            "Net weight", net_weights, "mismatch",
-            "Net weights differ between documents."
+            t("Net weight", "cross_doc_checks"), net_weights, "mismatch",
+            t("Net weights differ between documents.", "cross_doc_messages")
         )
 
     # 6. Package count
@@ -637,18 +639,18 @@ def validate_cross_documents(documents):
 
     if len(package_values) < 2:
         add_check(
-            "Package count", package_values, "needs_review",
-            "Not enough package counts to compare."
+            t("Package count", "cross_doc_checks"), package_values, "needs_review",
+            t("Not enough package counts to compare.", "cross_doc_messages")
         )
     elif len(set(package_values.values())) == 1:
         add_check(
-            "Package count", package_values, "passed",
-            "Package counts agree."
+            t("Package count", "cross_doc_checks"), package_values, "passed",
+            t("Package counts agree.", "cross_doc_messages")
         )
     else:
         add_check(
-            "Package count", package_values, "mismatch",
-            "Package counts differ between documents."
+            t("Package count", "cross_doc_checks"), package_values, "mismatch",
+            t("Package counts differ between documents.", "cross_doc_messages")
         )
 
     # 7. Invoice arithmetic
@@ -673,8 +675,8 @@ def validate_cross_documents(documents):
 
     if arithmetic_base is None or total is None:
         add_check(
-            "Invoice arithmetic", {}, "needs_review",
-            "A readable subtotal (or line-item amounts) and declared total are required."
+            t("Invoice arithmetic", "cross_doc_checks"), {}, "needs_review",
+            t("A readable subtotal (or line-item amounts) and declared total are required.", "cross_doc_messages")
         )
     else:
         calculated_total = (
@@ -696,13 +698,13 @@ def validate_cross_documents(documents):
 
         if calculated_total == total:
             add_check(
-                "Invoice arithmetic", values, "passed",
-                "The calculated total matches the declared total."
+                t("Invoice arithmetic", "cross_doc_checks"), values, "passed",
+                t("The calculated total matches the declared total.", "cross_doc_messages")
             )
         else:
             add_check(
-                "Invoice arithmetic", values, "mismatch",
-                "The calculated total does not match the declared total."
+                t("Invoice arithmetic", "cross_doc_checks"), values, "mismatch",
+                t("The calculated total does not match the declared total.", "cross_doc_messages")
             )
 
     summary = {
