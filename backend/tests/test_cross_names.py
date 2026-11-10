@@ -52,20 +52,20 @@ def test_address_fragment_is_an_extraction_problem_not_a_mismatch():
 def test_a_really_different_company_is_still_a_mismatch_and_named():
     other = dict(CONSIGNEE_OK, certificate_of_quality="NOVA PHARMA SARL")
     check = run(EXPORTER, other)["Consignee"]
-    assert check["status"] == "mismatch"
+    assert check["status"] == "failed"
     assert "Certificate of quality" in check["message"]
     assert "Commercial invoice" not in check["message"]       # the majority is not blamed
 
 
 def test_a_really_different_arabic_company_is_still_a_mismatch():
     other = dict(CONSIGNEE_OK, certificate_of_origin="ش.ذ.م.م نوفا فارما")
-    assert run(EXPORTER, other)["Consignee"]["status"] == "mismatch"
+    assert run(EXPORTER, other)["Consignee"]["status"] == "failed"
 
 
 def test_first_document_being_odd_does_not_fail_everyone():
     odd_first = {"commercial_invoice": "Wrong Co", **{k: v for k, v in CONSIGNEE_OK.items() if k != "commercial_invoice"}}
     check = run(EXPORTER, odd_first)["Consignee"]
-    assert check["status"] == "mismatch" and "Commercial invoice" in check["message"]
+    assert check["status"] == "failed" and "Commercial invoice" in check["message"]
 
 
 @pytest.mark.parametrize("a,b", [

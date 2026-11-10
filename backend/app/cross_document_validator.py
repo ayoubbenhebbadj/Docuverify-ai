@@ -1,382 +1,287 @@
+"""Enhanced cross-document validation with multilingual normalization and confidence scoring.
+
+Replaces naive string comparison with field-specific normalization and structured outcomes:
+- MATCH: High-confidence equivalence
+- POSSIBLE_MATCH: Probable equivalence but needs review
+- MISMATCH: Clear contradiction
+- INSUFFICIENT_EVIDENCE: Missing or unreliable data
+"""
+from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
 from decimal import Decimal, InvalidOperation
+from typing import Dict, Any, Optional, Tuple, List
+from datetime import date
 
 from app.localization import _, get_language, t, cross_doc_check_label, cross_doc_message
+from app.normalization import (
+    normalize_company_name, normalize_identifier, parse_weight_kg,
+    parse_number, normalize_date, normalize_amount, normalize_currency,
+    normalize_weight, normalize_quantity, normalize_country,
+    parse_date_flexible, consonant_skeleton, names_match
+)
 
 
-def normalize(value):
-    """Normalize text for reliable comparisons."""
-    if value is None:
-        return ""
+# =============================================================================
+# COMPARISON OUTCOMES
+# =============================================================================
 
-    text = str(value).strip().lower()
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[.,;:]+$", "", text)
+class ComparisonOutcome:
+    # New enriched outcomes
+    MATCH = "match"
+    POSSIBLE_MATCH = "possible_match"
+    MISMATCH = "mismatch"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
-    return text
-
-def normalize_company_name(value):
-    """Normalize a company name for cross-document comparison."""
-    if value is None:
-        return ""
-
-    text = str(value).strip()
-
-    # Remove registration and tax details when they follow a separator.
-    text = re.split(
-        r"[,;]|\b(?:EORI|VAT(?:\s+ID)?|Tax\s+ID|Registration\s+No\.?)\s*:",
-        text,
-        maxsplit=1,
-        flags=re.IGNORECASE,
-    )[0]
-
-    # Ignore descriptive exporter suffixes that are not part of the legal name.
-    text = re.sub(r"\s*\(\s*for\s+export\s*\)\s*", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bfor\s+export\b", " ", text, flags=re.IGNORECASE)
-
-    # Normalize whitespace and punctuation.
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip(" .,:;-")
-    # Drop a trailing address while the legal suffix (LTD, LLC ...) is still there to cut at.
-    if not _ARABIC_RE.search(text):
-        text = strip_address_suffix(text)
-    text = text.lower()
-
-    # Normalize common OCR spacing variations in legal suffixes.
-    text = re.sub(r"(?<=[a-z])(?=(?:gmbh|ltd|limited|llc|inc|corp|sarl)\b)", " ", text)
-    # Legal forms are not the core name and are frequently omitted in Arabic.
-    text = re.sub(r"\b(?:sarl|gmbh|ltd|limited|llc|inc|corp|corporation)\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"\s+co\.?$", "", text)       # "... trading co" / "co.,ltd" remnant
-
-    if _ARABIC_RE.search(text):
-        text = _strip_arabic_noise(text)
-    else:
-        text = strip_address_suffix(text)
-
-    return text
-
-_ARABIC_RE = re.compile(r"[\u0600-\u06ff]")
-
-# Words that are not part of an Arabic company name: legal forms, the "for export"
-# suffix, and address fragments that OCR frequently glues onto the name.
-_ARABIC_NOISE_WORDS = {
-    "للتصدير", "لتصدير", "التصدير", "شركة", "شركه", "مؤسسة", "مؤسسه",
-    "قسم", "ملكية", "ملكيه", "مجموعة", "مجموعه", "المنطقة", "المنطقه",
-    "منطقة", "منطقه", "الصناعية", "الصناعيه", "صناعية", "صناعيه",
-    "شارع", "حي", "ولاية", "ولايه", "الجزائر",
-}
-_ADDRESS_WORDS = _ARABIC_NOISE_WORDS - {
-    "للتصدير", "لتصدير", "التصدير", "شركة", "شركه", "مؤسسة", "مؤسسه",
-} | {
-    "zone", "industrielle", "industrial", "sect", "sector", "secteur", "gp",
-    "groupe", "loc", "lot", "rue", "street", "road", "avenue", "boulevard",
-    "bp", "lotissement", "cite", "bloc", "wilaya", "commune",
-}
+    # Legacy mappings for backward compatibility
+    PASSED = "passed"
+    NEEDS_REVIEW = "needs_review"
+    FAILED = "failed"
 
 
-def _arabic_tokens(text):
-    return [t for t in re.split(r"[\s.،]+", text) if t]
+def _label(doc_type: str) -> str:
+    return str(doc_type).replace("_", " ").capitalize()
 
 
-def _strip_arabic_noise(text):
-    """Drop legal-form letters (ش.ذ.م.م), 'for export' and address words."""
-    kept = []
-    for tok in _arabic_tokens(text):
-        is_arabic = bool(_ARABIC_RE.search(tok))
-        if is_arabic and len(tok) == 1:          # ش / ذ / م / م from legal forms
-            continue
-        if tok in _ARABIC_NOISE_WORDS:
-            continue
-        kept.append(tok)
-    return " ".join(kept)
+# =============================================================================
+# FIELD-SPECIFIC COMPARISON FUNCTIONS
+# =============================================================================
+
+def compare_identifiers(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare document identifiers (invoice numbers, B/L numbers, etc.)."""
+    norm_a = normalize_identifier(value_a)
+    norm_b = normalize_identifier(value_b)
+
+    if not norm_a or not norm_b:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, "One or both identifiers are empty"
+
+    if norm_a == norm_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Identifiers match exactly: {norm_a}"
+
+    # Check if they're close (e.g., OCR errors)
+    similarity = SequenceMatcher(None, norm_a, norm_b).ratio()
+    if similarity >= 0.9:
+        return ComparisonOutcome.POSSIBLE_MATCH, similarity, f"Identifiers very similar: {norm_a} vs {norm_b}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Identifiers differ: {norm_a} vs {norm_b}"
 
 
-_LEGAL_SUFFIXES = {"ltd", "coltd", "limited", "llc", "inc", "gmbh", "corp", "plc", "sarl", "eurl", "spa"}
+def compare_companies(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare company names with multilingual normalization."""
+    # Use the existing sophisticated names_match but also get a confidence score
+    match = names_match(value_a, value_b, threshold=0.88)
 
+    # Get normalized versions for explanation
+    norm_a = normalize_company_name(value_a)
+    norm_b = normalize_company_name(value_b)
 
-def strip_address_suffix(value):
-    """'BIOPPAM SARL ZONE INDUSTRIELLE SECT 02 ... NIF:123' -> 'BIOPPAM SARL'.
+    # Compute similarity for confidence
+    similarity = SequenceMatcher(None, norm_a, norm_b).ratio()
 
-    Cuts at the first address word (after at least one name word) only when what
-    follows is clearly an address: two or more address words/numbers.
-    """
-    if not value:
-        return value
-    tokens = str(value).split()
+    # Also check consonant skeleton
+    sk_a = consonant_skeleton(norm_a)
+    sk_b = consonant_skeleton(norm_b)
+    sk_match = sk_a == sk_b if sk_a and sk_b else False
 
-    def is_addr(tok):
-        t = tok.casefold().strip(".,;:()")
-        return t in _ADDRESS_WORDS or t.startswith("nif") or any(c.isdigit() for c in t)
+    if not norm_a or not norm_b:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, "One or both company names are empty"
 
-    # Everything after a trailing legal form ("... CO.,LTD TIANJIN FREE TRADE ZONE ...") is address.
-    for i, tok in enumerate(tokens[:-1]):
-        flat = re.sub(r"[^a-z0-9]", "", tok.casefold())
-        if i >= 1 and flat in _LEGAL_SUFFIXES:
-            return " ".join(tokens[: i + 1])
-
-    for i in range(1, len(tokens)):
-        t = tokens[i].casefold().strip(".,;:()")
-        if (t in _ADDRESS_WORDS or t.startswith("nif")) and \
-                sum(is_addr(x) for x in tokens[i:]) >= 2:
-            return " ".join(tokens[:i])
-    return value
-
-
-def looks_like_address(value) -> bool:
-    """True when the value is an address fragment rather than a company name."""
-    if value is None:
-        return False
-    tokens = [t.casefold() for t in re.split(r"[\s.,،;:/\-]+", str(value)) if t]
-    hits = sum(1 for t in tokens if t in _ADDRESS_WORDS)
-    rest = [
-        t for t in tokens
-        if t not in _ADDRESS_WORDS and not any(c.isdigit() for c in t)
-        and not (len(t) == 1 and _ARABIC_RE.search(t))
-    ]
-    return hits >= 2 and (not rest or hits >= 3)
-
-
-_AR_SKELETON = {
-    "ب": "b", "پ": "b", "ت": "t", "ث": "t", "ط": "t", "ج": "j",
-    "ح": "h", "ه": "h", "خ": "k", "ك": "k", "ق": "k", "د": "d", "ض": "d",
-    "ذ": "z", "ز": "z", "ظ": "z", "ر": "r", "س": "s", "ص": "s", "ش": "s",
-    "غ": "g", "ف": "f", "ل": "l", "م": "m", "ن": "n",
-    # vowels / semi-vowels / ayn / hamza: dropped, like vowels in Latin
-}
-_LATIN_DIGRAPHS = (("sh", "s"), ("ch", "s"), ("kh", "k"), ("th", "t"),
-                   ("ph", "f"), ("gh", "g"), ("dh", "z"))
-_LATIN_SKELETON = {"p": "b", "v": "f", "c": "k", "q": "k", "x": "ks"}
-
-
-def consonant_skeleton(value) -> str:
-    """Script-independent consonant skeleton, so 'BIOPPAM' == 'بيوببام'.
-
-    Vowels are dropped (they are unwritten or unreliable in Arabic), similar-sounding
-    consonants are folded together and repeated letters are collapsed.
-    """
-    if not value:
-        return ""
-    text = str(value).casefold()
-    text = re.sub(r"[\u064b-\u0652\u0640]", "", text)          # diacritics, tatweel
-    out = []
-    for word in re.split(r"[^a-z\u0600-\u06ff0-9]+", text):
-        if not word:
-            continue
-        if _ARABIC_RE.search(word):
-            word = re.sub(r"[هة]$", "", word)                   # final ه/ة is a vowel (-a)
-            letters = [_AR_SKELETON.get(ch, "") for ch in word]
+    if match:
+        if similarity >= 0.95 or sk_match:
+            return ComparisonOutcome.MATCH, 0.95, f"Company names match: {value_a} ≈ {value_b}"
         else:
-            for src, dst in _LATIN_DIGRAPHS:
-                word = word.replace(src, dst)
-            letters = [_LATIN_SKELETON.get(ch, ch) for ch in word if ch not in "aeiouyw"]
-        out.extend(letters)
-    skeleton = "".join(out)
-    return re.sub(r"(.)\1+", r"\1", skeleton)
+            return ComparisonOutcome.POSSIBLE_MATCH, similarity, f"Company names likely match (similarity: {similarity:.2f}): {value_a} ≈ {value_b}"
+
+    return ComparisonOutcome.MISMATCH, similarity, f"Company names differ: {value_a} vs {value_b}"
 
 
-def normalize_identifier(value):
-    """Normalise a document number, tolerating common OCR confusions."""
-    if value is None:
-        return ""
-    text = re.sub(r"[^A-Za-z0-9]", "", str(value)).upper()
-    return text.translate(str.maketrans("OIL", "011"))
+def compare_dates(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare dates with flexible parsing."""
+    date_a = parse_date_flexible(value_a)
+    date_b = parse_date_flexible(value_b)
+
+    if not date_a or not date_b:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not parse one or both dates: {value_a} vs {value_b}"
+
+    if date_a == date_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Dates match: {date_a.isoformat()}"
+
+    # Check if they're close (within a few days - possible OCR error)
+    diff = abs((date_a - date_b).days)
+    if diff <= 2:
+        return ComparisonOutcome.POSSIBLE_MATCH, max(0.7, 1.0 - diff * 0.1), f"Dates very close ({diff} days apart): {date_a} vs {date_b}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Dates differ: {date_a} vs {date_b}"
 
 
-def _arabic_to_latin_name(value: str) -> str:
-    """Lightweight name transliteration for common Arabic spellings.
+def compare_amounts(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare monetary amounts."""
+    amount_a = parse_amount(value_a)
+    amount_b = parse_amount(value_b)
 
-    This is deliberately limited to company-name comparison; it is not a
-    general-purpose Arabic transliterator. Arabic ب can represent Latin b/p,
-    and common vowel letters are mapped to approximate Latin vowels.
+    if amount_a is None or amount_b is None:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not parse one or both amounts: {value_a} vs {value_b}"
+
+    if amount_a == amount_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Amounts match exactly: {amount_a}"
+
+    # Small difference might be rounding
+    diff = abs(amount_a - amount_b)
+    if diff <= Decimal("0.01"):
+        return ComparisonOutcome.POSSIBLE_MATCH, 0.9, f"Amounts differ by {diff} (possible rounding): {amount_a} vs {amount_b}"
+
+    # Check if relative difference is small
+    if amount_a != 0:
+        rel_diff = diff / abs(amount_a)
+        if rel_diff <= Decimal("0.001"):  # 0.1%
+            return ComparisonOutcome.POSSIBLE_MATCH, float(1.0 - float(rel_diff)), f"Amounts very close (rel diff: {rel_diff:.4f}): {amount_a} vs {amount_b}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Amounts differ: {amount_a} vs {amount_b}"
+
+
+def compare_currencies(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare currency codes."""
+    curr_a, _ = normalize_currency(value_a)
+    curr_b, _ = normalize_currency(value_b)
+
+    if not curr_a or not curr_b:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not determine currency codes: {value_a} vs {value_b}"
+
+    if curr_a == curr_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Currencies match: {curr_a}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Currencies differ: {curr_a} vs {curr_b}"
+
+
+def compare_weights(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare weights in kilograms."""
+    kg_a = parse_weight_kg(value_a)
+    kg_b = parse_weight_kg(value_b)
+
+    if kg_a is None or kg_b is None:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not parse one or both weights: {value_a} vs {value_b}"
+
+    if kg_a == kg_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Weights match: {kg_a} kg"
+
+    diff = abs(kg_a - kg_b)
+    if diff <= Decimal("0.01"):
+        return ComparisonOutcome.MATCH, 1.0, f"Weights match within tolerance: {kg_a} kg vs {kg_b} kg"
+
+    if diff <= Decimal("0.1"):
+        return ComparisonOutcome.POSSIBLE_MATCH, 0.8, f"Weights very close ({diff} kg diff): {kg_a} kg vs {kg_b} kg"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Weights differ: {kg_a} kg vs {kg_b} kg"
+
+
+def compare_quantities(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare package counts / quantities."""
+    qty_a = parse_quantity(value_a)
+    qty_b = parse_quantity(value_b)
+
+    if qty_a is None or qty_b is None:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not parse quantities: {value_a} vs {value_b}"
+
+    if qty_a == qty_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Quantities match: {qty_a}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Quantities differ: {qty_a} vs {qty_b}"
+
+
+def compare_countries(value_a: str, value_b: str) -> Tuple[str, float, str]:
+    """Compare country names."""
+    country_a, _ = normalize_country(value_a)
+    country_b, _ = normalize_country(value_b)
+
+    if not country_a or not country_b:
+        return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, f"Could not determine country codes: {value_a} vs {value_b}"
+
+    if country_a == country_b:
+        return ComparisonOutcome.MATCH, 1.0, f"Countries match: {country_a}"
+
+    return ComparisonOutcome.MISMATCH, 0.0, f"Countries differ: {country_a} vs {country_b}"
+
+
+# =============================================================================
+# FIELD-TO-COMPARER MAPPING
+# =============================================================================
+
+COMPARISON_DISPATCH = {
+    # Identifiers
+    "invoice_number": compare_identifiers,
+    "packing_list_number": compare_identifiers,
+    "bill_of_lading_number": compare_identifiers,
+    "certificate_number": compare_identifiers,
+    "booking_number": compare_identifiers,
+    "container_numbers": compare_identifiers,
+    "seal_numbers": compare_identifiers,
+    "customs_declaration_number": compare_identifiers,
+
+    # Company names
+    "exporter_name": compare_companies,
+    "consignee_name": compare_companies,
+    "shipper_name": compare_companies,
+    "notify_party": compare_companies,
+    "issuer_name": compare_companies,
+    "producer_name": compare_companies,
+    "issuing_authority": compare_companies,
+    "carrier_name": compare_companies,
+    "buyer_name": compare_companies,
+    "supplier_name": compare_companies,
+    "company_name": compare_companies,
+
+    # Dates
+    "invoice_date": compare_dates,
+    "issue_date": compare_dates,
+    "on_board_date": compare_dates,
+    "inspection_date": compare_dates,
+    "treatment_date": compare_dates,
+
+    # Amounts
+    "amount": compare_amounts,
+    "total_amount": compare_amounts,
+    "subtotal": compare_amounts,
+    "freight_and_handling": compare_amounts,
+    "insurance_fee": compare_amounts,
+    "tax_amount": compare_amounts,
+    "line_item_amounts": compare_amounts,
+    "calculated_total": compare_amounts,
+    "declared_total": compare_amounts,
+
+    # Currency
+    "currency": compare_currencies,
+
+    # Weights
+    "total_gross_weight": compare_weights,
+    "total_net_weight": compare_weights,
+    "line_item_gross_weights": compare_weights,
+    "line_item_net_weights": compare_weights,
+    "package_weight": compare_weights,
+
+    # Quantities
+    "total_quantity": compare_quantities,
+    "quantity": compare_quantities,
+    "package_count": compare_quantities,
+    "line_item_package_counts": compare_quantities,
+
+    # Countries
+    "country_of_origin": compare_countries,
+    "destination_country": compare_countries,
+}
+
+
+# =============================================================================
+# MAIN VALIDATION FUNCTION
+# =============================================================================
+
+from difflib import SequenceMatcher
+
+
+def validate_cross_documents(documents: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    mapping = str.maketrans({
-        "ا": "a", "أ": "a", "إ": "i", "آ": "a", "ى": "a",
-        "ب": "b", "ت": "t", "ث": "th", "ج": "j", "ح": "h",
-        "خ": "kh", "د": "d", "ذ": "th", "ر": "r", "ز": "z",
-        "س": "s", "ش": "sh", "ص": "s", "ض": "d", "ط": "t",
-        "ظ": "z", "ع": "a", "غ": "gh", "ف": "f", "ق": "q",
-        "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h",
-        "ة": "a", "و": "o", "ي": "i", "ئ": "i", "ؤ": "o",
-        "ء": "", "پ": "p",
-    })
-    return value.translate(mapping)
+    Compare extracted fields across documents with enhanced normalization.
 
-def _company_identity(value: str) -> str:
-    """
-    Extract the likely company identity from a company name that may
-    have an address appended to it.
-
-    This is intentionally conservative: only known address markers
-    are treated as the beginning of an appended address.
-    """
-    text = normalize_company_name(value)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    address_markers = (
-        r"\bzone industrielle\b",
-        r"\bindustrial zone\b",
-        r"\bloc(?:ation)?\s+\d+\b",
-        r"\bouledmoussa\b",
-        r"\bboumerdes\b",
-        r"\balger\b",
-        r"\balgeria\b",
-        r"\balgerie\b",
-    )
-
-    for marker in address_markers:
-        match = re.search(marker, text, flags=re.IGNORECASE)
-        if match and match.start() > 0:
-            text = text[:match.start()].strip()
-            break
-
-    return re.sub(r"\s+", " ", text).strip()
-
-def names_match(a: str, b: str, threshold: float = 0.88) -> bool:
-    """Compare normalized company names, including simple Arabic transliteration."""
-    squash = lambda v: re.sub(r"[^a-z0-9]", "", v.casefold())
-    a_norm = normalize_company_name(a)
-    b_norm = normalize_company_name(b)
-    # Compare the core company identity when address details are appended.
-    a_identity = _company_identity(a)
-    b_identity = _company_identity(b)
-    if a_identity and b_identity and a_identity == b_identity:
-        return True
-    a_has_arabic = bool(re.search(r"[\u0600-\u06ff]", a_norm))
-    b_has_arabic = bool(re.search(r"[\u0600-\u06ff]", b_norm))
-
-    # Cross-script comparison on consonant skeletons (handles Arabic vs Latin spellings
-    # and common OCR letter confusions such as ب read as ي).
-    if a_has_arabic or b_has_arabic:
-        sk_a, sk_b = consonant_skeleton(a_norm), consonant_skeleton(b_norm)
-        if sk_a and sk_b:
-            if sk_a == sk_b:
-                return True
-            # OCR often inserts a stray ه ("بيوبيهام" for "بيوببام"); retry without h.
-            nh_a, nh_b = sk_a.replace("h", ""), sk_b.replace("h", "")
-            if min(len(nh_a), len(nh_b)) >= 2 and nh_a == nh_b:
-                return True
-            if min(len(sk_a), len(sk_b)) >= 5 and \
-                    SequenceMatcher(None, sk_a, sk_b).ratio() >= 0.85:
-                return True
-
-    candidates_a = {squash(a_norm)}
-    candidates_b = {squash(b_norm)}
-    if a_has_arabic:
-        candidates_a.add(squash(_arabic_to_latin_name(a_norm)))
-    if b_has_arabic:
-        candidates_b.add(squash(_arabic_to_latin_name(b_norm)))
-
-    # The exporter country is sometimes appended to the name by OCR/extraction
-    # even though the document has a separate country field.
-    country_suffixes = ("egypt", "algeria", "algerie", "tunisia", "morocco", "china", "india")
-    for candidate_set in (candidates_a, candidates_b):
-        candidate_set.update(
-            candidate[:-len(country)]
-            for candidate in list(candidate_set)
-            for country in country_suffixes
-            if candidate.endswith(country) and len(candidate) > len(country) + 3
-        )
-
-    # In Arabic company names, ب commonly stands in for Latin p. If either
-    # side is Arabic, compare a b/p-neutral variant as well.
-    if a_has_arabic or b_has_arabic:
-        candidates_a |= {v.replace("p", "b") for v in list(candidates_a)}
-        candidates_a |= {v.replace("b", "p") for v in list(candidates_a)}
-        candidates_b |= {v.replace("p", "b") for v in list(candidates_b)}
-        candidates_b |= {v.replace("b", "p") for v in list(candidates_b)}
-
-    candidates_a.discard("")
-    candidates_b.discard("")
-    if not candidates_a or not candidates_b:
-        return False
-    if candidates_a.intersection(candidates_b):
-        return True
-    # One side may omit trailing descriptors ("... International Trading Co").
-    for left in candidates_a:
-        for right in candidates_b:
-            short, long_ = sorted((left, right), key=len)
-            if len(short) >= 8 and long_.startswith(short):
-                return True
-    return max(
-        SequenceMatcher(None, left, right).ratio()
-        for left in candidates_a for right in candidates_b
-    ) >= threshold
-
-
-def parse_number(value):
-    """Convert a numeric value or simple formatted number to Decimal."""
-    if value is None:
-        return None
-
-    if isinstance(value, (int, float, Decimal)):
-        return Decimal(str(value))
-
-    text = str(value).strip()
-    text = text.replace(",", "").replace("€", "").replace("$", "")
-    text = re.sub(r"\s+", "", text)
-
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return None
-
-    try:
-        return Decimal(match.group())
-    except InvalidOperation:
-        return None
-
-
-def parse_weight_kg(value):
-    """Extract a weight and convert it to kilograms."""
-    if value is None:
-        return None
-
-    text = str(value).strip().lower()
-    # "1,234.50" -> "1234.50" (thousands separators)
-    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)
-
-    match = re.search(
-        r"(-?\d+(?:[.,]\d+)?)\s*"
-        r"(kgs?|kilograms?|kilos?|grams?|g|lbs?|pounds?|tonnes?|tons?|mt|t)"
-        r"(?![a-z])",
-        text,
-    )
-
-    if not match:
-        # The compared fields are explicitly weight fields; many extractors
-        # return the numeric value but omit the unit despite the source saying KG.
-        numeric = re.fullmatch(r"\s*-?\d+(?:[.,]\d+)?\s*", text)
-        if not numeric:
-            return None
-        return Decimal(text.strip().replace(",", "."))
-
-    amount = Decimal(match.group(1).replace(",", "."))
-    unit = match.group(2)
-
-    if unit in {"g", "gram", "grams"}:
-        return amount / Decimal("1000")
-    if unit in {"lb", "lbs", "pound", "pounds"}:
-        return amount * Decimal("0.45359237")
-    if unit in {"t", "mt", "tonne", "tonnes", "ton", "tons"}:
-        return amount * Decimal("1000")
-    return amount
-
-
-def validate_cross_documents(documents):
-    """
-    Compare extracted fields across documents.
-
-    Expected input:
-    [
-        {
-            "document_type": "commercial_invoice",
-            "fields": {...}
-        },
-        ...
-    ]
+    Returns structured comparison results with outcomes, confidence, and explanations.
     """
     by_type = {
         doc.get("document_type"): (doc.get("fields") or {})
@@ -389,117 +294,151 @@ def validate_cross_documents(documents):
 
     checks = []
 
-    def add_check(name, values, status, message, ignored=None):
+    def add_check(name: str, field_name: str, values: Dict[str, Any],
+                  outcome: str, confidence: float, message: str,
+                  comparison_method: str = "", ignored: List[str] = None) -> None:
+        """Add a comparison check with full metadata."""
         item = {
             "check": name,
-            "status": status,
+            "field": field_name,
+            "status": outcome,
+            "confidence": round(confidence, 3),
             "values": values,
             "message": message,
+            "comparison_method": comparison_method,
         }
         if ignored:
             item["ignored"] = ignored
         checks.append(item)
 
-    def _label(doc_type):
-        return str(doc_type).replace("_", " ").capitalize()
-
-    def _compare_companies(name, values):
-        """Group names by identity; blame only the documents that disagree with the majority."""
-        address_docs = {
-            d: v for d, v in values.items()
-            if looks_like_address(strip_address_suffix(v))
-        }
-        usable = {d: v for d, v in values.items() if d not in address_docs}
-        address_note = ""
-        if address_docs:
-            address_note = (
-                f"{', '.join(_label(d) for d in address_docs)}: "
-                f"{t('address, not a company name - check the extraction.', 'cross_doc_messages')} "
-            )
-
-        groups = []   # each: list of doc types whose names refer to the same company
-        for doc_type, value in usable.items():
-            cleaned = normalize_company_name(value)
-            for group in groups:
-                if names_match(normalize_company_name(usable[group[0]]), cleaned):
-                    group.append(doc_type)
-                    break
-            else:
-                groups.append([doc_type])
-
-        if len(usable) < 2:
-            add_check(name, values, "needs_review",
-                      (address_note + t("Not enough usable names to compare.", "cross_doc_messages")).strip())
-            return
-
-        if len(groups) == 1:
-            if address_docs:
-                add_check(name, values, "needs_review", address_note.strip())
-            else:
-                add_check(name, values, "passed", t("Values match.", "cross_doc_messages"))
-            return
-
-        groups.sort(key=len, reverse=True)
-        if len(groups[0]) > len(groups[1]):
-            odd = [d for g in groups[1:] for d in g]
-            detail = "; ".join(f"{_label(d)} ({usable[d]})" for d in odd)
-            message = t("Differs from the majority of documents: ", "cross_doc_messages") + detail + "."
-        else:
-            message = t("Documents disagree: ", "cross_doc_messages") + " vs ".join(
-                ", ".join(_label(d) for d in g) for g in groups) + "."
-        add_check(name, values, "mismatch", (address_note + message).strip())
-
-    def compare_text(name, field_sources):
+    def compare_field_values(name: str, field_name: str,
+                             field_sources: List[Tuple[str, str]]) -> None:
+        """Compare values for a specific field across documents."""
         values = {}
 
-        for doc_type, field_name in field_sources:
+        for doc_type, field_key in field_sources:
+            if field_key in unsupported_by_type.get(doc_type, set()):
+                continue
             fields = by_type.get(doc_type, {})
-            value = fields.get(field_name)
-
+            value = fields.get(field_key)
             if value is not None and str(value).strip():
                 values[doc_type] = value
 
         if len(values) < 2:
             add_check(
-                name, values, "needs_review",
-                t("Not enough documents contain this field to compare.", "cross_doc_messages")
+                name, field_name, values,
+                ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
+                t("Not enough documents contain this field to compare.", "cross_doc_messages"),
+                comparison_method="insufficient_data"
             )
             return
 
-        raw = list(values.values())
+        # Use field-specific comparer if available
+        comparer = COMPARISON_DISPATCH.get(field_name)
+        if comparer:
+            # For company names, we need special handling with multiple values
+            if field_name in ("exporter_name", "consignee_name", "shipper_name"):
+                outcome, confidence, message = compare_companies_multi(values)
+                add_check(name, field_name, values, outcome, confidence, message,
+                         comparison_method="multilingual_company_matching")
+            else:
+                # Pairwise comparison for other fields
+                doc_types = list(values.keys())
+                if len(doc_types) == 2:
+                    dt1, dt2 = doc_types[0], doc_types[1]
+                    outcome, confidence, message = comparer(values[dt1], values[dt2])
+                    add_check(name, field_name, values, outcome, confidence, message,
+                             comparison_method=comparer.__name__)
+                else:
+                    # Multiple documents - compare all pairs
+                    outcomes = []
+                    for i, dt1 in enumerate(doc_types):
+                        for dt2 in doc_types[i+1:]:
+                            o, c, m = comparer(values[dt1], values[dt2])
+                            outcomes.append((o, c, m, dt1, dt2))
 
-        if name in ("Exporter / shipper", "Consignee"):
-            _compare_companies(name, values)
-            return
-        elif name == "Invoice number":
-            ids = {normalize_identifier(v) for v in raw}
-            same = len(ids) == 1
+                    # Aggregate: if any MISMATCH -> MISMATCH, if all MATCH -> MATCH, etc.
+                    if any(o == ComparisonOutcome.MISMATCH for o, _, _, _, _ in outcomes):
+                        outcome = ComparisonOutcome.MISMATCH
+                    elif all(o == ComparisonOutcome.MATCH for o, _, _, _, _ in outcomes):
+                        outcome = ComparisonOutcome.MATCH
+                    elif any(o == ComparisonOutcome.POSSIBLE_MATCH for o, _, _, _, _ in outcomes):
+                        outcome = ComparisonOutcome.POSSIBLE_MATCH
+                    else:
+                        outcome = ComparisonOutcome.INSUFFICIENT_EVIDENCE
+
+                    confidence = sum(c for _, c, _, _, _ in outcomes) / len(outcomes) if outcomes else 0.0
+                    message = "; ".join(f"{_label(dt1)} vs {_label(dt2)}: {m}" for _, _, m, dt1, dt2 in outcomes)
+                    add_check(name, field_name, values, outcome, confidence, message,
+                             comparison_method=comparer.__name__)
         else:
-            same = len({normalize(v) for v in raw}) == 1
+            # Default: simple string normalization comparison
+            norm_values = {dt: normalize_text(v) for dt, v in values.items()}
+            unique = set(norm_values.values())
 
-        if same:
-            add_check(name, values, "passed", t("Values match.", "cross_doc_messages"))
-            return
+            if len(unique) == 1:
+                add_check(name, field_name, values,
+                         ComparisonOutcome.MATCH, 1.0,
+                         t("Values match.", "cross_doc_messages"),
+                         comparison_method="normalized_string")
+            else:
+                add_check(name, field_name, values,
+                         ComparisonOutcome.MISMATCH, 0.0,
+                         t("Documents disagree: ", "cross_doc_messages") +
+                         " vs ".join(f"{_label(d)} ({v})" for d, v in values.items()) + ".",
+                         comparison_method="normalized_string")
 
-        key = normalize_identifier if name == "Invoice number" else normalize
-        groups = {}
-        for doc_type, value in values.items():
-            groups.setdefault(key(value), []).append(doc_type)
-        ordered = sorted(groups.values(), key=len, reverse=True)
-        if len(ordered[0]) > len(ordered[1]):
-            odd = "; ".join(
-                f"{_label(d)} ({values[d]})" for g in ordered[1:] for d in g
-            )
-            message = t("Differs from the majority of documents: ", "cross_doc_messages") + odd + "."
+
+    def compare_companies_multi(values: Dict[str, str]) -> Tuple[str, float, str]:
+        """Compare company names across multiple documents."""
+        # Group by identity using names_match
+        address_docs = {d: v for d, v in values.items() if looks_like_address(strip_address_suffix(v))}
+        usable = {d: v for d, v in values.items() if d not in address_docs}
+
+        if not usable or len(usable) < 2:
+            return ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0, "Not enough usable company names"
+
+        # Build identity groups
+        groups = []
+        for doc_type, value in usable.items():
+            cleaned = normalize_company_name(value)
+            matched = False
+            for group in groups:
+                if names_match(normalize_company_name(usable[group[0]]), cleaned):
+                    group.append(doc_type)
+                    matched = True
+                    break
+            if not matched:
+                groups.append([doc_type])
+
+        if len(groups) == 1:
+            if address_docs:
+                address_note = f"{', '.join(_label(d) for d in address_docs)}: address not company name. "
+                # Address fragment is an extraction problem, not a company mismatch
+                return ComparisonOutcome.NEEDS_REVIEW, 0.5, address_note + "All company names match"
+            else:
+                address_note = ""
+                # Return legacy status for backward compatibility
+                return ComparisonOutcome.PASSED, 0.95, address_note + "All company names match"
+
+        # Multiple groups - find majority
+        groups.sort(key=len, reverse=True)
+        if len(groups[0]) > len(groups[1]):
+            odd = [d for g in groups[1:] for d in g]
+            detail = "; ".join(f"{_label(d)} ({usable[d]})" for d in odd)
+            return ComparisonOutcome.FAILED, 0.0, f"Majority disagrees with: {detail}"
         else:
-            message = t("Documents disagree: ", "cross_doc_messages") + " vs ".join(
-                ", ".join(f"{_label(d)} ({values[d]})" for d in g) for g in ordered
-            ) + "."
-        add_check(name, values, "mismatch", message)
+            message = "Documents disagree: " + " vs ".join(
+                ", ".join(_label(d) for d in g) for g in groups) + "."
+            return ComparisonOutcome.FAILED, 0.0, message
+
+    # =========================================================================
+    # COMPARISON CHECKS
+    # =========================================================================
 
     # 1. Invoice number
-    compare_text(
-        "Invoice number",
+    compare_field_values(
+        "Invoice number", "invoice_number",
         [
             ("commercial_invoice", "invoice_number"),
             ("packing_list", "invoice_number"),
@@ -511,8 +450,8 @@ def validate_cross_documents(documents):
     )
 
     # 2. Exporter / shipper
-    compare_text(
-        "Exporter / shipper",
+    compare_field_values(
+        "Exporter / shipper", "exporter_name",
         [
             ("commercial_invoice", "exporter_name"),
             ("packing_list", "exporter_name"),
@@ -526,8 +465,8 @@ def validate_cross_documents(documents):
     )
 
     # 3. Consignee
-    compare_text(
-        "Consignee",
+    compare_field_values(
+        "Consignee", "consignee_name",
         [
             ("commercial_invoice", "consignee_name"),
             ("packing_list", "consignee_name"),
@@ -565,27 +504,22 @@ def validate_cross_documents(documents):
     if ignored_gross:
         ignored_labels = ", ".join(_label(d) for d in ignored_gross)
         add_check(
-            t("Gross weight", "cross_doc_checks"),
-            weights,
-            "needs_review",
+            t("Gross weight", "cross_doc_checks"), "total_gross_weight",
+            weights, ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
             f"{ignored_labels}: {t('gross weight was not found in the document and was excluded from comparison.', 'cross_doc_messages')}",
-            ignored=ignored_gross,
+            comparison_method="weight_kg", ignored=ignored_gross
         )
     elif len(weights) < 2:
         add_check(
-            t("Gross weight", "cross_doc_checks"), weights, "needs_review",
-            t("Not enough readable gross weights to compare.", "cross_doc_messages")
-        )
-    elif max(weights.values()) - min(weights.values()) <= Decimal("0.01"):
-        add_check(
-            t("Gross weight", "cross_doc_checks"), weights, "passed",
-            t("Gross weights agree within 0.01 kg.", "cross_doc_messages")
+            t("Gross weight", "cross_doc_checks"), "total_gross_weight",
+            weights, ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
+            t("Not enough readable gross weights to compare.", "cross_doc_messages"),
+            comparison_method="weight_kg"
         )
     else:
-        add_check(
-            t("Gross weight", "cross_doc_checks"), weights, "mismatch",
-            t("Gross weights differ between documents.", "cross_doc_messages")
-        )
+        # Use the field comparer
+        compare_field_values(t("Gross weight", "cross_doc_checks"), "total_gross_weight",
+                           [(dt, "total_gross_weight") for dt in weights.keys()])
 
     # 5. Net weight
     net_weights = {}
@@ -595,24 +529,18 @@ def validate_cross_documents(documents):
     ):
         value = by_type.get(doc_type, {}).get("total_net_weight")
         parsed = parse_weight_kg(value)
-
         if parsed is not None:
             net_weights[doc_type] = parsed
 
-    if len(net_weights) < 2:
-        add_check(
-            t("Net weight", "cross_doc_checks"), net_weights, "needs_review",
-            t("Not enough readable net weights to compare.", "cross_doc_messages")
-        )
-    elif max(net_weights.values()) - min(net_weights.values()) <= Decimal("0.01"):
-        add_check(
-            t("Net weight", "cross_doc_checks"), net_weights, "passed",
-            t("Net weights agree within 0.01 kg.", "cross_doc_messages")
-        )
+    if len(net_weights) >= 2:
+        compare_field_values(t("Net weight", "cross_doc_checks"), "total_net_weight",
+                           [(dt, "total_net_weight") for dt in net_weights.keys()])
     else:
         add_check(
-            t("Net weight", "cross_doc_checks"), net_weights, "mismatch",
-            t("Net weights differ between documents.", "cross_doc_messages")
+            t("Net weight", "cross_doc_checks"), "total_net_weight",
+            net_weights, ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
+            t("Not enough readable net weights to compare.", "cross_doc_messages"),
+            comparison_method="weight_kg"
         )
 
     # 6. Package count
@@ -628,32 +556,23 @@ def validate_cross_documents(documents):
     package_values = {}
     for doc_type, field_name in package_sources:
         value = by_type.get(doc_type, {}).get(field_name)
+        if value is not None:
+            match = re.search(r"\d+", str(value))
+            if match:
+                package_values[doc_type] = int(match.group())
 
-        if value is None:
-            continue
-
-        # Compare the number of packages, not the number of individual items.
-        match = re.search(r"\d+", str(value))
-        if match:
-            package_values[doc_type] = int(match.group())
-
-    if len(package_values) < 2:
-        add_check(
-            t("Package count", "cross_doc_checks"), package_values, "needs_review",
-            t("Not enough package counts to compare.", "cross_doc_messages")
-        )
-    elif len(set(package_values.values())) == 1:
-        add_check(
-            t("Package count", "cross_doc_checks"), package_values, "passed",
-            t("Package counts agree.", "cross_doc_messages")
-        )
+    if len(package_values) >= 2:
+        compare_field_values(t("Package count", "cross_doc_checks"), "package_count",
+                           [(dt, "package_count") for dt in package_values.keys()])
     else:
         add_check(
-            t("Package count", "cross_doc_checks"), package_values, "mismatch",
-            t("Package counts differ between documents.", "cross_doc_messages")
+            t("Package count", "cross_doc_checks"), "package_count",
+            package_values, ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
+            t("Not enough package counts to compare.", "cross_doc_messages"),
+            comparison_method="quantity"
         )
 
-    # 7. Invoice arithmetic
+    # 7. Invoice arithmetic (special case - internal consistency)
     invoice = by_type.get("commercial_invoice", {})
 
     subtotal = parse_number(invoice.get("subtotal"))
@@ -665,8 +584,6 @@ def validate_cross_documents(documents):
     parsed_line_amounts = [parse_number(v) for v in line_amounts] if isinstance(line_amounts, list) else []
     parsed_line_amounts = [v for v in parsed_line_amounts if v is not None]
 
-    # Many invoices do not print a subtotal field, but do print each line amount
-    # and a separate freight charge. Sum the visible line amounts instead.
     arithmetic_base = subtotal
     base_label = "subtotal"
     if arithmetic_base is None and parsed_line_amounts:
@@ -675,8 +592,10 @@ def validate_cross_documents(documents):
 
     if arithmetic_base is None or total is None:
         add_check(
-            t("Invoice arithmetic", "cross_doc_checks"), {}, "needs_review",
-            t("A readable subtotal (or line-item amounts) and declared total are required.", "cross_doc_messages")
+            t("Invoice arithmetic", "cross_doc_checks"), "invoice_arithmetic",
+            {}, ComparisonOutcome.INSUFFICIENT_EVIDENCE, 0.0,
+            t("A readable subtotal (or line-item amounts) and declared total are required.", "cross_doc_messages"),
+            comparison_method="arithmetic"
         )
     else:
         calculated_total = (
@@ -698,23 +617,96 @@ def validate_cross_documents(documents):
 
         if calculated_total == total:
             add_check(
-                t("Invoice arithmetic", "cross_doc_checks"), values, "passed",
-                t("The calculated total matches the declared total.", "cross_doc_messages")
+                t("Invoice arithmetic", "cross_doc_checks"), "invoice_arithmetic",
+                values, ComparisonOutcome.MATCH, 1.0,
+                t("The calculated total matches the declared total.", "cross_doc_messages"),
+                comparison_method="arithmetic"
             )
         else:
+            diff = abs(calculated_total - total)
+            if diff <= Decimal("0.01"):
+                outcome = ComparisonOutcome.POSSIBLE_MATCH
+                confidence = 0.9
+            else:
+                outcome = ComparisonOutcome.MISMATCH
+                confidence = 0.0
             add_check(
-                t("Invoice arithmetic", "cross_doc_checks"), values, "mismatch",
-                t("The calculated total does not match the declared total.", "cross_doc_messages")
+                t("Invoice arithmetic", "cross_doc_checks"), "invoice_arithmetic",
+                values, outcome, confidence,
+                t("The calculated total does not match the declared total.", "cross_doc_messages"),
+                comparison_method="arithmetic"
             )
 
+    # Summary with new outcome types
     summary = {
         "total_checks": len(checks),
-        "passed": sum(c["status"] == "passed" for c in checks),
-        "mismatches": sum(c["status"] == "mismatch" for c in checks),
-        "needs_review": sum(c["status"] == "needs_review" for c in checks),
+        "match": sum(c["status"] in (ComparisonOutcome.MATCH, ComparisonOutcome.PASSED) for c in checks),
+        "possible_match": sum(c["status"] == ComparisonOutcome.POSSIBLE_MATCH for c in checks),
+        "mismatch": sum(c["status"] in (ComparisonOutcome.MISMATCH, ComparisonOutcome.FAILED) for c in checks),
+        "insufficient_evidence": sum(c["status"] == ComparisonOutcome.INSUFFICIENT_EVIDENCE for c in checks),
+        # Legacy fields for backward compatibility
+        "passed": sum(c["status"] in (ComparisonOutcome.MATCH, ComparisonOutcome.PASSED) for c in checks),
+        "mismatches": sum(c["status"] in (ComparisonOutcome.MISMATCH, ComparisonOutcome.FAILED) for c in checks),
+        "needs_review": sum(c["status"] in (ComparisonOutcome.POSSIBLE_MATCH, ComparisonOutcome.INSUFFICIENT_EVIDENCE) for c in checks),
     }
 
     return {
         "summary": summary,
         "checks": checks,
     }
+
+
+# =============================================================================
+# HELPER FUNCTIONS (duplicated from normalization for backward compatibility)
+# =============================================================================
+
+def normalize_text(value):
+    """Normalize text for reliable comparisons."""
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[.,;:]+$", "", text)
+    return text
+
+
+def looks_like_address(value) -> bool:
+    """True when the value is an address fragment rather than a company name."""
+    if value is None:
+        return False
+    tokens = [t.casefold() for t in re.split(r"[\s.,،;:/\-]+", str(value)) if t]
+    # Use the same address words from normalization
+    from app.normalization import _ADDRESS_INDICATORS
+    hits = sum(1 for t in tokens if t in _ADDRESS_INDICATORS)
+    rest = [
+        t for t in tokens
+        if t not in _ADDRESS_INDICATORS and not any(c.isdigit() for c in t)
+        and not (len(t) == 1 and re.search(r"[؀-ۿ]", t))
+    ]
+    return hits >= 2 and (not rest or hits >= 3)
+
+
+def strip_address_suffix(value):
+    """Strip address suffix from company name."""
+    if not value:
+        return value
+    tokens = str(value).split()
+
+    from app.normalization import _ADDRESS_INDICATORS, _LEGAL_SUFFIXES
+
+    def is_addr(tok):
+        t = tok.casefold().strip(".,;:()")
+        return t in _ADDRESS_INDICATORS or t.startswith("nif") or any(c.isdigit() for c in t)
+
+    # Everything after a trailing legal form ("... CO.,LTD TIANJIN FREE TRADE ZONE ...") is address.
+    for i, tok in enumerate(tokens[:-1]):
+        flat = re.sub(r"[^a-z0-9]", "", tok.casefold())
+        if i >= 1 and flat in _LEGAL_SUFFIXES:
+            return " ".join(tokens[: i + 1])
+
+    for i in range(1, len(tokens)):
+        t = tokens[i].casefold().strip(".,;:()")
+        if (t in _ADDRESS_INDICATORS or t.startswith("nif")) and \
+                sum(is_addr(x) for x in tokens[i:]) >= 2:
+            return " ".join(tokens[:i])
+    return value
