@@ -123,7 +123,7 @@ def _check(docs, name="Gross weight"):
 
 def test_value_not_found_in_its_document_is_not_compared_as_a_fact():
     check = _check(_docs("24667 KG", unsupported=["total_gross_weight"]))
-    assert check["status"] == "needs_review"                       # not a false "mismatch"
+    assert check["status"] == "insufficient_evidence"                       # not a false "mismatch"
     assert "commercial_invoice" in check["ignored"]
     assert "Commercial invoice" in check["message"] and "not found" in check["message"]
 
@@ -134,4 +134,4 @@ def test_a_real_discrepancy_is_still_a_mismatch():
 
 def test_agreeing_documents_pass_cleanly():
     check = _check(_docs("27667 KG"))
-    assert check["status"] == "passed" and "ignored" not in check
+    assert check["status"] == "match" and "ignored" not in check

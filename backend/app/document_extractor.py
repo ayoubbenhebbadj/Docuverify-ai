@@ -1,10 +1,112 @@
 import json
 import os
+import logging
 
-from app.ai_extractor import create_with_retry, model, parse_json_content
+from app.ai_extractor import (
+    create_with_retry, model, parse_json_content, extract_targeted_fields
+)
 from app.evidence import build_evidence
 from app.derive import derive_totals
 
+log = logging.getLogger(__name__)
+
+
+# Field priority: "required" = must extract or flag, "optional" = nice to have, "conditional" = depends on document
+FIELD_PRIORITY = {
+    "commercial_invoice": {
+        "required": [
+            "invoice_number", "invoice_date", "exporter_name", "consignee_name",
+            "total_amount", "currency", "goods_description",
+        ],
+        "optional": [
+            "issuer_name", "buyer_name", "subtotal", "freight_and_handling",
+            "insurance_fee", "tax_amount", "country_of_origin",
+            "total_quantity", "total_net_weight", "total_gross_weight",
+            "package_count", "line_item_amounts", "line_item_gross_weights",
+            "line_item_net_weights", "line_item_package_counts",
+        ],
+        "conditional": [],
+    },
+    "packing_list": {
+        "required": [
+            "packing_list_number", "exporter_name", "consignee_name",
+            "package_count", "total_gross_weight", "goods_description",
+        ],
+        "optional": [
+            "invoice_number", "total_quantity", "package_types",
+            "total_net_weight", "line_item_gross_weights",
+            "line_item_net_weights", "line_item_package_counts",
+            "line_items", "country_of_origin",
+        ],
+        "conditional": [],
+    },
+    "bill_of_lading": {
+        "required": [
+            "bill_of_lading_number", "shipper_name", "consignee_name",
+            "carrier_name", "port_of_loading", "port_of_discharge",
+            "package_count", "total_gross_weight",
+        ],
+        "optional": [
+            "booking_number", "notify_party", "vessel_name",
+            "place_of_receipt", "place_of_delivery", "goods_description",
+            "container_numbers", "seal_numbers", "on_board_date",
+        ],
+        "conditional": [],
+    },
+    "certificate_of_origin": {
+        "required": [
+            "certificate_number", "exporter_name", "consignee_name",
+            "country_of_origin", "goods_description", "issuing_authority",
+        ],
+        "optional": [
+            "producer_name", "destination_country", "invoice_number", "issue_date",
+        ],
+        "conditional": [],
+    },
+    "certificate_of_quality": {
+        "required": [
+            "certificate_number", "issuer_name", "exporter_name", "consignee_name",
+            "product_name", "goods_description", "inspection_results", "issue_date",
+        ],
+        "optional": [
+            "total_gross_weight", "total_net_weight", "package_count",
+        ],
+        "conditional": [],
+    },
+    "certificate_of_conformity": {
+        "required": [
+            "certificate_number", "issuer_name", "exporter_name", "consignee_name",
+            "product_name", "goods_description", "conformity_status", "issue_date",
+        ],
+        "optional": [
+            "applicable_standards", "invoice_number",
+        ],
+        "conditional": [],
+    },
+    "phytosanitary_certificate": {
+        "required": [
+            "certificate_number", "exporter_name", "consignee_name",
+            "country_of_origin", "destination_country", "botanical_name",
+            "goods_description", "quantity", "inspection_date", "issue_date",
+        ],
+        "optional": [
+            "bill_of_lading_number", "total_gross_weight", "total_net_weight", "package_count",
+        ],
+        "conditional": [],
+    },
+    "fumigation_certificate": {
+        "required": [
+            "certificate_number", "issuer_name", "exporter_name", "consignee_name",
+            "goods_description", "fumigant", "treatment_date", "duration",
+            "temperature", "issue_date",
+        ],
+        "optional": [
+            "invoice_number", "bill_of_lading_number",
+            "total_gross_weight", "total_net_weight", "package_count",
+        ],
+        "conditional": [],
+    },
+}
 
 DOCUMENT_SCHEMAS = {
     "commercial_invoice": {
@@ -603,6 +705,35 @@ No Markdown fences or commentary.
 
     # Compute totals deterministically from evidence-backed line items.
     derived = derive_totals(normalized_fields, normalized_evidence)
+
+    # --- Targeted re-extraction for missing required fields ---
+    priority = FIELD_PRIORITY.get(document_type, {})
+    required_fields = priority.get("required", [])
+    missing_required = [
+        f for f in required_fields
+        if derived["fields"].get(f) is None
+    ]
+
+    if missing_required:
+        # Run targeted extraction only for missing required fields
+        try:
+            targeted_results = extract_targeted_fields(
+                document_type=document_type,
+                document_text=document_text,
+                missing_fields=missing_required,
+            )
+
+            for field, field_data in targeted_results.items():
+                if isinstance(field_data, dict):
+                    value = field_data.get(field)
+                    evidence = field_data.get("evidence")
+                    if value is not None:
+                        derived["fields"][field] = value
+                        if evidence:
+                            derived["evidence"][field] = evidence
+        except Exception as e:
+            # Log but don't fail - targeted extraction is best-effort
+            log.warning("Targeted re-extraction failed for %s: %s", document_type, e)
 
     return {
         "document_type": document_type,
