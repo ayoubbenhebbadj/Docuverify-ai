@@ -45,6 +45,11 @@ TARGET_DPI = 400          # effective resolution we feed to Tesseract
 MAX_SCALE = 4.5
 MAX_LONG_SIDE = 5600      # px, keeps memory/time bounded
 FALLBACK_RENDER_DPI = 300
+# Hard ceiling on any side of an image we will feed to Tesseract.  A 600 DPI
+# A4 page would otherwise be ~7000 px wide; bounding it here keeps peak image
+# memory under control without changing the effective resolution we already
+# use for the sample scans (which sit around 150-300 DPI).
+MAX_IMAGE_SIDE = int(os.getenv("OCR_MAX_IMAGE_SIDE", "4200"))
 GOOD_ENOUGH_CONFIDENCE = 90.0   # skip extra passes when the first one is this good
 GOOD_ENOUGH_WORDS = 25
 TESSERACT_TIMEOUT = 180   # seconds per recognition call
@@ -203,6 +208,23 @@ def _page_image(page: fitz.Page) -> tuple[np.ndarray, float]:
     if pix.n == 1:
         array = np.repeat(array, 3, axis=2)
     return array[:, :, :3].copy(), float(FALLBACK_RENDER_DPI)
+
+
+def _downscale_for_ocr(rgb: np.ndarray, dpi: float) -> tuple[np.ndarray, float]:
+    """Cap the largest side at MAX_IMAGE_SIDE, preserving aspect ratio.
+
+    Returns the (possibly smaller) array and a corrected effective DPI so the
+    downstream upscale math stays consistent.  This is a safety net for very
+    large pages; for ordinary scans it is a no-op.
+    """
+    h, w = rgb.shape[:2]
+    long_side = max(h, w)
+    if long_side <= MAX_IMAGE_SIDE:
+        return rgb, dpi
+    scale = MAX_IMAGE_SIDE / long_side
+    new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    resized = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return resized, dpi * scale
 
 
 # --------------------------------------------------------------------------
@@ -525,13 +547,16 @@ def _lines_to_text(lines: list[list[Word]]) -> str:
 # Public API
 # --------------------------------------------------------------------------
 
-def ocr_page(page: fitz.Page, language: str | None = None) -> dict:
-    """OCR one PDF page and report word-level confidence."""
-    _configure_tesseract()
-    lang = resolve_languages(language)
+def _preprocess(rgb: np.ndarray, dpi: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    """Shared OCR pre-processing: normalise, skew-correct, upscale, pad.
 
-    rgb, dpi = _page_image(page)
-    thorough = os.getenv("OCR_THOROUGH") == "1"
+    Returns ``(gray_img, min_n, gray_n, scale, skew, dpi)`` where ``gray_img``
+    is the primary recognition image (already padded) and ``min_n``/``gray_n``
+    are the source-size variants kept for the fallback passes.  Only
+    ``gray_img`` is upscaled to the target DPI; the others stay at source
+    resolution until a second pass is actually needed.
+    """
+    rgb, dpi = _downscale_for_ocr(rgb, dpi)
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     # min(R,G,B) keeps coloured (e.g. blue stamp) text dark.
@@ -549,6 +574,19 @@ def ocr_page(page: fitz.Page, language: str | None = None) -> dict:
 
     gray_img, scale = _upscale(gray_n, dpi)
     gray_img = _pad(gray_img)
+    return gray_img, min_n, gray_n, scale, skew, dpi
+
+
+def ocr_page(page: fitz.Page, language: str | None = None) -> dict:
+    """OCR one PDF page and report word-level confidence."""
+    _configure_tesseract()
+    lang = resolve_languages(language)
+
+    rgb, dpi = _page_image(page)
+    thorough = os.getenv("OCR_THOROUGH") == "1"
+
+    gray_img, min_n, gray_n, scale, skew, dpi = _preprocess(rgb, dpi)
+    del rgb
 
     rotation = 0
     words_a = _recognise(gray_img, 3, lang)
@@ -691,18 +729,87 @@ def ocr_image(image: np.ndarray, dpi: float = 300, language: str | None = None) 
             },
         }
 
-    # Reuse the fully tuned page pipeline by embedding the supplied pixels in a
-    # temporary in-memory PDF at the caller's effective DPI.
-    ok, encoded = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-    if not ok:
-        raise ValueError("Could not encode image for OCR.")
-    height, width = rgb.shape[:2]
-    page_width = max(width * 72.0 / max(float(dpi), 1.0), 1.0)
-    page_height = max(height * 72.0 / max(float(dpi), 1.0), 1.0)
-    with fitz.open() as doc:
-        page = doc.new_page(width=page_width, height=page_height)
-        page.insert_image(page.rect, stream=encoded.tobytes())
-        result = ocr_page(page, language=language)
-    result["ocr_sparse"] = False
-    result["ocr_blank"] = not bool(result.get("text", "").strip())
-    return result
+    # Use the shared pre-processing pipeline directly; no in-memory PDF needed.
+    _configure_tesseract()
+    lang = resolve_languages(language)
+    thorough = os.getenv("OCR_THOROUGH") == "1"
+
+    gray_img, min_n, gray_n, scale, skew, dpi = _preprocess(rgb, float(dpi))
+    del rgb
+
+    rotation = 0
+    words_a = _recognise(gray_img, 3, lang)
+
+    good_enough = (
+        (_mean_conf(words_a) or 0) >= GOOD_ENOUGH_CONFIDENCE
+        and len(words_a) >= GOOD_ENOUGH_WORDS
+    )
+
+    if len(words_a) < 15 or (_mean_conf(words_a) or 0) < 60:
+        rotation = _best_rotation(gray_img, lang, _score(words_a))
+    elif not good_enough:
+        hint = _osd_hint(gray_img)
+        if hint:
+            options = (180,) if hint == 180 else (90, 270)
+            rotation = _best_rotation(
+                gray_img, lang, _score(words_a), options, margin=0.92
+            )
+
+    if rotation:
+        gray_img = _rotate_clockwise(gray_img, rotation)
+        min_n = _rotate_clockwise(min_n, rotation)
+        words_a = _recognise(gray_img, 3, lang)
+
+    passes = [words_a]
+    pass_names = ["psm3/gray"]
+
+    good_enough = (
+        (_mean_conf(words_a) or 0) >= GOOD_ENOUGH_CONFIDENCE
+        and len(words_a) >= GOOD_ENOUGH_WORDS
+    )
+
+    if thorough or not good_enough:
+        passes.append(_recognise(gray_img, 6, lang))
+        pass_names.append("psm6/gray")
+
+        min_img, _ = _upscale(min_n, dpi)
+        min_img = _pad(min_img)
+        passes.append(_recognise(min_img, 11, lang))
+        pass_names.append("psm11/min-rgb")
+
+    if (_mean_conf(max(passes, key=_score)) or 0) < 80:
+        enhanced = _pad(_upscale(_enhance(gray_n if rotation == 0 else _rotate_clockwise(gray_n, rotation)), dpi)[0])
+        passes.append(_recognise(enhanced, 6, lang))
+        pass_names.append("psm6/enhanced")
+
+    lines = _merge([p for p in passes if p])
+    final_words = [w for line in lines for w in line]
+
+    text = _lines_to_text(lines)
+    average_confidence = _mean_conf(final_words)
+    low_confidence = (
+        average_confidence is None
+        or average_confidence < LOW_CONFIDENCE_THRESHOLD
+    )
+
+    return {
+        "text": text,
+        "ocr_used": True,
+        "ocr_confidence": average_confidence,
+        "ocr_word_count": len(final_words),
+        "ocr_low_confidence": low_confidence,
+        "ocr_sparse": False,
+        "ocr_blank": not bool(text.strip()),
+        "ocr_details": {
+            "source_dpi": round(dpi),
+            "scale": round(scale, 2),
+            "skew_degrees": round(skew, 1),
+            "rotation": rotation,
+            "languages": lang,
+            "missing_languages": [
+                l for l in (os.getenv("OCR_LANGUAGES") or "eng+fra+ara").split("+")
+                if l.strip() and l.strip() not in _installed_languages()
+            ],
+            "passes": pass_names,
+        },
+    }

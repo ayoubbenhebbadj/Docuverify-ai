@@ -16,6 +16,10 @@ from pathlib import Path
 import pymupdf as fitz
 from PIL import Image
 
+# Maximum pixel dimension for images embedded in PDFs.  Downscale larger
+# uploads to keep peak memory bounded on small instances.
+MAX_IMAGE_SIDE = int(os.getenv("CONVERTER_MAX_IMAGE_SIDE", "3000"))
+
 MAX_FILE_SIZE = 10 * 1024 * 1024
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"}
 _OLE_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
@@ -32,14 +36,39 @@ def _validate_docx(data: bytes, filename: str) -> None:
         raise ValueError(f"{filename}: This is not a valid DOCX document.") from exc
 
 
-def _image_to_pdf(data: bytes, filename: str) -> bytes:
+def _downscale_image(data: bytes, filename: str) -> bytes:
+    """Downscale an image if it exceeds MAX_IMAGE_SIDE.
+
+    Returns the (possibly recompressed) image bytes.  JPEG stays JPEG, PNG
+    stays PNG; quality is kept high so OCR is not harmed.
+    """
     try:
         with Image.open(io.BytesIO(data)) as image:
             image.verify()
-        # Embed the original validated image stream directly. Re-encoding it
-        # through RGB + PNG created multiple full-resolution copies in RAM and
-        # could also increase conversion time. PyMuPDF supports JPEG and PNG
-        # streams directly, preserving their original image quality.
+            fmt = image.format
+    except Exception:
+        fmt = None
+
+    with Image.open(io.BytesIO(data)) as image:
+        if image.width < 1 or image.height < 1:
+            raise ValueError("empty image")
+        if max(image.width, image.height) <= MAX_IMAGE_SIDE:
+            return data
+        scale = MAX_IMAGE_SIDE / max(image.width, image.height)
+        new_w = max(1, int(round(image.width * scale)))
+        new_h = max(1, int(round(image.height * scale)))
+        resized = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        save_fmt = fmt if fmt in ("JPEG", "PNG") else "PNG"
+        resized.save(buffer, format=save_fmt, quality=90, optimize=True)
+        return buffer.getvalue()
+
+
+def _image_to_pdf(data: bytes, filename: str) -> bytes:
+    try:
+        data = _downscale_image(data, filename)
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
         with Image.open(io.BytesIO(data)) as image:
             if image.width < 1 or image.height < 1:
                 raise ValueError("empty image")

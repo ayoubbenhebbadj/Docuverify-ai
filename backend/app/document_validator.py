@@ -5,6 +5,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 import unicodedata
 
+from app.localization import _, get_language, validation_message
+
 # Initial required-field rules.
 # We can refine these as we establish your company's requirements.
 REQUIRED_FIELDS = {
@@ -325,7 +327,7 @@ def validate_document(
         if isinstance(value, str) and not value.strip():
             invalid_fields.append({
                 "field": field,
-                "reason": "Value is an empty string.",
+                "reason": validation_message("Value is an empty string."),
             })
             continue
 
@@ -333,7 +335,7 @@ def validate_document(
             if not isinstance(value, str):
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Date must be a YYYY-MM-DD string.",
+                    "reason": validation_message("Date must be a YYYY-MM-DD string."),
                 })
             else:
                 try:
@@ -343,7 +345,7 @@ def validate_document(
                 except ValueError:
                     invalid_fields.append({
                         "field": field,
-                        "reason": "Invalid date; expected YYYY-MM-DD.",
+                        "reason": validation_message("Invalid date; expected YYYY-MM-DD."),
                     })
 
         elif field in MONEY_FIELDS:
@@ -352,7 +354,7 @@ def validate_document(
             if number is None or number < 0:
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Expected a non-negative numeric amount.",
+                    "reason": validation_message("Expected a non-negative numeric amount."),
                 })
 
         elif field == "currency":
@@ -361,7 +363,7 @@ def validate_document(
             ):
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Expected a three-letter currency code.",
+                    "reason": validation_message("Expected a three-letter currency code."),
                 })
 
         elif field in WEIGHT_FIELDS:
@@ -374,7 +376,7 @@ def validate_document(
             ):
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Weight must include a recognizable unit.",
+                    "reason": validation_message("Weight must include a recognizable unit."),
                 })
 
         elif field == "package_count":
@@ -385,26 +387,26 @@ def validate_document(
             ):
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Expected a package count or package description.",
+                    "reason": validation_message("Expected a package count or package description."),
                 })
             elif isinstance(value, (int, float)) and (
                 value <= 0 or int(value) != value
             ):
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Numeric package count must be a positive integer.",
+                    "reason": validation_message("Numeric package count must be a positive integer."),
                 })
             elif isinstance(value, str) and not value.strip():
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Package description is empty.",
+                    "reason": validation_message("Package description is empty."),
                 })
 
         elif field in IDENTIFIER_FIELDS:
             if not isinstance(value, str) or not value.strip():
                 invalid_fields.append({
                     "field": field,
-                    "reason": "Expected a non-empty identifier string.",
+                    "reason": validation_message("Expected a non-empty identifier string."),
                 })
 
     # 3. Check that non-null extracted fields have source evidence.
@@ -457,16 +459,16 @@ def validate_document(
 
 
     if unsupported_evidence:
-        warnings.append(
+        warnings.append(validation_message(
             "Some extracted values could not be matched to their "
             "provided evidence quotations in the source text."
-        )
+        ))
 
     if missing_fields:
-        warnings.append("One or more required fields are missing.")
+        warnings.append(validation_message("One or more required fields are missing."))
 
     if invalid_fields:
-        warnings.append("One or more fields failed format validation.")
+        warnings.append(validation_message("One or more fields failed format validation."))
 
     # Evidence problems are review flags, not proof that the value is false.
     status = (

@@ -3,6 +3,7 @@ import os
 import traceback
 import time
 import threading
+import tempfile
 from fastapi.openapi.utils import get_openapi
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -21,6 +22,7 @@ from app.pdf_reader import extract_pdf_text
 from app.file_converter import convert_upload_to_pdf, MAX_FILE_SIZE as MAX_MIXED_FILE_SIZE, SUPPORTED_EXTENSIONS
 from app.vision_ocr import recover_uncertain_pages
 from app.validator import validate_document as validate_invoice_fields
+from app.localization import get_language, set_language, _, t, doc_label, status_label, field_label, legal_disclaimer
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -48,15 +50,57 @@ app.add_middleware(
     allow_origins=_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Accept-Language"],
 )
+
+
+@app.middleware("http")
+async def set_request_language(request, call_next):
+    """Set response language from Accept-Language header or query param."""
+    lang = request.query_params.get("lang") or request.headers.get("Accept-Language", "").split(",")[0].strip().lower()
+    if lang.startswith("fr"):
+        set_language("fr")
+    else:
+        set_language("en")
+    response = await call_next(request)
+    response.headers["Content-Language"] = get_language()
+    return response
+
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per PDF
 MAX_PACKAGE_SIZE = 30 * 1024 * 1024  # 30 MB total for multiple PDFs
 
+# Safeguards against pathological inputs on small instances.
+MAX_PAGES = int(os.getenv("MAX_PAGES", "100"))  # absolute page ceiling
+MAX_IMAGE_PIXELS = int(os.getenv("MAX_IMAGE_PIXELS", "16000000"))  # ~4k x 4k
+
 # A single 512 MB Render instance should not run two full package pipelines
 # at the same time. Typed extraction still uses its configured internal workers.
 _PACKAGE_ANALYSIS_LOCK = threading.Lock()
+
+
+def _rss_mb() -> float:
+    """Current process RSS in MB (cross-platform best effort)."""
+    try:
+        import psutil
+        return psutil.Process().memory_info().rss / (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return 0.0
+
+
+def _log_memory(stage: str) -> None:
+    """Log current RSS at a pipeline stage for debugging."""
+    rss = _rss_mb()
+    if rss:
+        log.info("[MEM] %s: %.1f MB", stage, rss)
 
 
 def _language_warnings() -> list[str]:
@@ -104,19 +148,19 @@ def _no_text_response(filename: str, pdf_result: dict) -> dict:
     errors = pdf_result.get("ocr_errors") or []
 
     if errors:
-        message = (
-            "The PDF has no selectable text and OCR could not run: "
-            f"{errors[0]}"
-        )
+        message = t(
+            "The PDF has no selectable text and OCR could not run: ",
+            "ocr_messages"
+        ) + errors[0]
     elif ocr_attempted:
-        message = (
-            "OCR was attempted but no readable text was recognized. "
-            "The scan may be too faint, blurred or low resolution."
+        message = t(
+            "OCR was attempted but no readable text was recognized. The scan may be too faint, blurred or low resolution.",
+            "ocr_messages"
         )
     else:
-        message = (
-            "No selectable text was found. "
-            "OCR support is required for this document."
+        message = t(
+            "No selectable text was found. OCR support is required for this document.",
+            "ocr_messages"
         )
 
     return {
@@ -258,14 +302,28 @@ def _combined_page_source(page: dict) -> str:
 def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
     package_started = time.perf_counter()
     log.info("[TIMING] ===== PACKAGE ANALYSIS START: %s =====", filename)
+    _log_memory("analysis start")
+
+    # Safeguard: reject PDFs with too many pages up front.
+    # Only check if the bytes look like a real PDF (not test mocks).
+    if pdf_bytes.startswith(b"%PDF-"):
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            page_count = len(doc)
+            if page_count > MAX_PAGES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"PDF has {page_count} pages, exceeding the {MAX_PAGES}-page limit."
+                )
 
     # 1. Extract text from every PDF page (OCR for scanned pages).
     stage_started = time.perf_counter()
     pdf_result = extract_pdf_text(pdf_bytes)
     log.info("[TIMING] Stage PDF extraction/Tesseract: %.2f s", time.perf_counter() - stage_started)
+    _log_memory("after pdf extraction")
     stage_started = time.perf_counter()
     pdf_result = recover_uncertain_pages(pdf_bytes, pdf_result)
     log.info("[TIMING] Stage Vision fallback: %.2f s", time.perf_counter() - stage_started)
+    _log_memory("after vision fallback")
 
     if not pdf_result["has_text"]:
         return _no_text_response(filename, pdf_result)
@@ -313,6 +371,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
     stage_started = time.perf_counter()
     classification = classify_document_pages(pages)
     log.info("[TIMING] Stage classification: %.2f s | docs=%s", time.perf_counter() - stage_started, len(classification.get("documents", [])))
+    _log_memory("after classification")
 
     extracted_documents = []
     document_results = []
@@ -409,6 +468,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
         len(extraction_jobs),
         max_workers,
     )
+    _log_memory("after typed extraction")
 
     # Validate and assemble in the original classifier order.
     for job in extraction_jobs:
@@ -501,6 +561,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
     cross_started = time.perf_counter()
     cross_validation = validate_cross_documents(extracted_documents)
     log.info("[TIMING] Stage cross-document validation: %.2f s", time.perf_counter() - cross_started)
+    _log_memory("after cross-doc validation")
 
     # 5. Summarize package-level issues.
     missing_documents = classification["missing_documents"]
@@ -528,6 +589,7 @@ def _analyze_package(filename: str, pdf_bytes: bytes) -> dict:
 
     total_elapsed = time.perf_counter() - package_started
     log.info("[TIMING] ===== PACKAGE ANALYSIS TOTAL: %.2f s (%.2f min) | %s =====", total_elapsed, total_elapsed / 60, filename)
+    _log_memory("analysis end")
 
     return {
         "filename": filename,
@@ -555,35 +617,88 @@ async def analyze_package(file: UploadFile = File(...)):
 
 
 def _merge_pdf_files(pdf_files: list[tuple[str, bytes]]) -> bytes:
-    """Merge validated PDF byte streams in memory, preserving upload order."""
-    merged = fitz.open()
-    try:
-        for filename, content in pdf_files:
-            try:
-                with fitz.open(stream=content, filetype="pdf") as source:
-                    if source.needs_pass:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"{filename}: This PDF is password-protected.",
-                        )
-                    if len(source) == 0:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"{filename}: The PDF contains no pages.",
-                        )
-                    merged.insert_pdf(source)
-            except fitz.FileDataError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{filename}: The file is not a valid or readable PDF.",
-                ) from exc
+    """Merge validated PDF byte streams, using disk when the combined size is large.
 
-        if len(merged) == 0:
-            raise HTTPException(status_code=400, detail="No PDF pages were uploaded.")
+    On small instances (<= 512 MB) keeping all source PDFs and the merged output
+    in memory simultaneously can exceed the limit.  If the total size exceeds
+    a threshold we write each validated PDF to a temp file, merge on disk, and
+    read back the result.
+    """
+    # Threshold at ~50 MB combined; above this we switch to disk-based merge.
+    MERGE_TO_DISK_THRESHOLD = int(os.getenv("MERGE_TO_DISK_THRESHOLD", "52428800"))
 
-        return merged.tobytes(garbage=3, deflate=True)
-    finally:
-        merged.close()
+    total_bytes = sum(len(content) for _, content in pdf_files)
+    use_disk = total_bytes > MERGE_TO_DISK_THRESHOLD
+
+    if not use_disk:
+        merged = fitz.open()
+        try:
+            for filename, content in pdf_files:
+                try:
+                    with fitz.open(stream=content, filetype="pdf") as source:
+                        if source.needs_pass:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"{filename}: This PDF is password-protected.",
+                            )
+                        if len(source) == 0:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"{filename}: The PDF contains no pages.",
+                            )
+                        merged.insert_pdf(source)
+                except fitz.FileDataError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{filename}: The file is not a valid or readable PDF.",
+                    ) from exc
+
+            if len(merged) == 0:
+                raise HTTPException(status_code=400, detail="No PDF pages were uploaded.")
+
+            return merged.tobytes(garbage=3, deflate=True)
+        finally:
+            merged.close()
+
+    # Disk-based merge: write each source PDF to a temp file, merge, read back.
+    with tempfile.TemporaryDirectory(prefix="docuverify_merge_") as tmp:
+        tmp_path = Path(tmp)
+        source_paths = []
+        for i, (filename, content) in enumerate(pdf_files):
+            src = tmp_path / f"src_{i}.pdf"
+            src.write_bytes(content)
+            source_paths.append((filename, src))
+
+        merged = fitz.open()
+        try:
+            for filename, src_path in source_paths:
+                try:
+                    with fitz.open(src_path) as source:
+                        if source.needs_pass:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"{filename}: This PDF is password-protected.",
+                            )
+                        if len(source) == 0:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"{filename}: The PDF contains no pages.",
+                            )
+                        merged.insert_pdf(source)
+                except fitz.FileDataError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{filename}: The file is not a valid or readable PDF.",
+                    ) from exc
+
+            if len(merged) == 0:
+                raise HTTPException(status_code=400, detail="No PDF pages were uploaded.")
+
+            out_path = tmp_path / "merged.pdf"
+            merged.save(out_path, garbage=3, deflate=True)
+            return out_path.read_bytes()
+        finally:
+            merged.close()
 
 
 @app.post("/api/documents/analyze-package-multiple")
