@@ -80,7 +80,7 @@ function detailOf(body: unknown): string | undefined {
 
 function hintFor(status: number, detail: string): string | undefined {
   const d = detail.toLowerCase()
-  if (status === 413) return 'Reduce the file size (the limit is 10 MB per file and 30 MB per package) and try again.'
+  if (status === 413) return 'Reduce the file size (the limit is 20 MB per file and 30 MB per package) and try again.'
   if (d.includes('password')) return 'Remove the password protection from the PDF and upload it again.'
   if (
     d.includes('not appear to be a valid pdf') ||

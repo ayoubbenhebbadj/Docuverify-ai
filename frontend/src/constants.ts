@@ -4,7 +4,7 @@ export const REQUIRED_DOCS = [
   { id: 'certificate_of_quality', label: 'Certificate of quality' }, { id: 'certificate_of_conformity', label: 'Certificate of conformity' },
   { id: 'phytosanitary_certificate', label: 'Phytosanitary certificate' }, { id: 'fumigation_certificate', label: 'Fumigation certificate' },
 ] as const
-export const MAX_BYTES = 10 * 1024 * 1024 // per-file limit; matches backend
+export const MAX_BYTES = 20 * 1024 * 1024 // 20 MiB per-file limit; matches backend
 export const MAX_PACKAGE_BYTES = 30 * 1024 * 1024 // total multi-file request limit
 export const titleCase = (s: string) => { const t = s.replace(/_/g, ' '); return t.charAt(0).toUpperCase() + t.slice(1) }
 export const docLabel = (id: string) => REQUIRED_DOCS.find(d => d.id === id)?.label ?? (id === 'unknown' ? 'Unrecognized pages' : titleCase(id))

@@ -20,7 +20,7 @@ from PIL import Image
 # uploads to keep peak memory bounded on small instances.
 MAX_IMAGE_SIDE = int(os.getenv("CONVERTER_MAX_IMAGE_SIDE", "3000"))
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MiB per file
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"}
 _OLE_SIGNATURE = bytes.fromhex("D0CF11E0A1B11AE1")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -140,7 +140,7 @@ def convert_upload_to_pdf(filename: str, data: bytes) -> bytes:
     if not data:
         raise ValueError(f"{filename}: The uploaded file is empty.")
     if len(data) > MAX_FILE_SIZE:
-        raise ValueError(f"{filename}: File exceeds the 10 MB per-file limit.")
+        raise ValueError(f"{filename}: File exceeds the 20 MB per-file limit.")
 
     if extension == ".pdf":
         if not data.startswith(b"%PDF-"):

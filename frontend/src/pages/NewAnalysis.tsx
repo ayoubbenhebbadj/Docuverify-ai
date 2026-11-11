@@ -90,7 +90,7 @@ export default function NewAnalysis() {
             <span className="text-blue-700 underline decoration-blue-300 underline-offset-2">{t.newAnalysis.dropTitle}</span>{' '}
             {t.newAnalysis.dropSub}
           </p>
-          <p className="text-xs text-slate-500 font-mono">PDF · DOCX · DOC · JPG · JPEG · PNG (max 10 MB each)</p>
+          <p className="text-xs text-slate-500 font-mono">PDF · DOCX · DOC · JPG · JPEG · PNG (max 20 MB each)</p>
         </div>
         <input
           ref={pick} type="file" accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,image/jpeg,image/png" multiple hidden disabled={running}
