@@ -16,9 +16,10 @@ from datetime import date
 from app.localization import _, get_language, t, cross_doc_check_label, cross_doc_message
 from app.normalization import (
     normalize_company_name, normalize_identifier, parse_weight_kg,
-    parse_number, normalize_date, normalize_amount, normalize_currency,
-    normalize_weight, normalize_quantity, normalize_country,
-    parse_date_flexible, consonant_skeleton, names_match
+    parse_number, parse_quantity, normalize_date, normalize_amount,
+    normalize_currency, normalize_weight, normalize_quantity,
+    normalize_country, parse_date_flexible, consonant_skeleton,
+    names_match
 )
 
 
