@@ -213,7 +213,7 @@ export const translations: Record<Language, TranslationDictionary> = {
     newAnalysis: {
       title: 'New analysis',
       subtitle: 'Add shipment files as they arrive, then analyze the files currently selected.',
-      tip: 'Upload PDF, DOCX, DOC, JPG, JPEG or PNG files. You can add more files after a scan and analyze the complete selection again. Maximum 10 MB per file and 30 MB total.',
+      tip: 'Upload PDF, DOCX, DOC, JPG, JPEG or PNG files. You can add more files after a scan and analyze the complete selection again. Maximum 20 MB per file and 30 MB total.',
       dropTitle: 'Choose files',
       dropSub: 'or drag them here',
       pdfOnly: 'PDF, DOCX, DOC, JPG, JPEG and PNG · multiple selection supported',
@@ -229,7 +229,7 @@ export const translations: Record<Language, TranslationDictionary> = {
       validation: {
         notPdf: 'Unsupported file format. Choose PDF, DOCX, DOC, JPG, JPEG or PNG.',
         empty: 'This file is empty.',
-        tooLarge: (size) => `This file is ${size}. The per-file limit is 10 MB.`,
+        tooLarge: (size) => `This file is ${size}. The per-file limit is 20 MB.`,
         packageTooLarge: (size) => `The selected files total ${size}. The package limit is 30 MB.`,
       },
     },
@@ -445,7 +445,7 @@ export const translations: Record<Language, TranslationDictionary> = {
     newAnalysis: {
       title: 'Nouvelle analyse',
       subtitle: 'Ajoutez les fichiers d’expédition au fur et à mesure de leur réception, puis analysez tous les fichiers sélectionnés.',
-      tip: 'Formats acceptés : PDF, DOCX, DOC, JPG, JPEG et PNG. Vous pouvez ajouter des fichiers après une analyse, puis relancer l’analyse de l’ensemble. Limite : 10 Mo par fichier et 30 Mo au total.',
+      tip: 'Formats acceptés : PDF, DOCX, DOC, JPG, JPEG et PNG. Vous pouvez ajouter des fichiers après une analyse, puis relancer l’analyse de l’ensemble. Limite : 20 Mo par fichier et 30 Mo au total.',
       dropTitle: 'Choisir des fichiers',
       dropSub: 'ou glissez-les ici',
       pdfOnly: 'PDF, DOCX, DOC, JPG, JPEG et PNG · sélection multiple',
@@ -461,7 +461,7 @@ export const translations: Record<Language, TranslationDictionary> = {
       validation: {
         notPdf: 'Format non pris en charge. Choisissez un fichier PDF, DOCX, DOC, JPG, JPEG ou PNG.',
         empty: 'Ce fichier est vide.',
-        tooLarge: (size) => `Ce fichier fait ${size}. La limite par fichier est de 10 Mo.`,
+        tooLarge: (size) => `Ce fichier fait ${size}. La limite par fichier est de 20 Mo.`,
         packageTooLarge: (size) => `La taille totale est de ${size}. La limite du dossier est de 30 Mo.`,
       },
     },

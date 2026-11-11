@@ -67,7 +67,7 @@ async def set_request_language(request, call_next):
     return response
 
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per PDF
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MiB per PDF
 MAX_PACKAGE_SIZE = 30 * 1024 * 1024  # 30 MB total for multiple PDFs
 
 # Safeguards against pathological inputs on small instances.
@@ -130,7 +130,7 @@ async def read_uploaded_pdf(file: UploadFile) -> tuple[str, bytes]:
     if len(pdf_bytes) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=413,
-            detail="The PDF exceeds the 10 MB upload limit.",
+            detail="The PDF exceeds the 20 MB upload limit.",
         )
 
     if not pdf_bytes.startswith(b"%PDF-"):
@@ -721,7 +721,7 @@ async def analyze_package_multiple(files: list[UploadFile] = File(...)):
             content = await file.read(MAX_MIXED_FILE_SIZE + 1)
             await file.close()
             if len(content) > MAX_MIXED_FILE_SIZE:
-                raise HTTPException(status_code=413, detail=f"{filename}: File exceeds the 10 MB per-file limit.")
+                raise HTTPException(status_code=413, detail=f"{filename}: File exceeds the 20 MB per-file limit.")
             total_size += len(content)
             if total_size > MAX_PACKAGE_SIZE:
                 raise HTTPException(status_code=413, detail="The combined uploads exceed the 30 MB package limit.")
