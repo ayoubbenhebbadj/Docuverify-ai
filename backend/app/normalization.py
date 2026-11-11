@@ -66,7 +66,14 @@ def normalize_arabic_text(text: str) -> str:
 
 
 def fold_digits(text: str) -> str:
-    """Convert Arabic-Indic and Extended Arabic-Indic digits to Western."""
+    """Convert Arabic-Indic and Extended Arabic-Indic digits to Western.
+
+    Accept scalar values defensively because AI extraction may return JSON
+    numbers as int/float rather than strings.
+    """
+    if text is None or isinstance(text, bool):
+        return ""
+    text = str(text)
     if not text:
         return ""
     return text.translate(_ARABIC_DIGITS_TRANS)
@@ -454,8 +461,11 @@ def _number_variants(token: str) -> set[Decimal]:
     return out
 
 
-def parse_amount(text: str) -> Optional[Decimal]:
-    """Parse monetary amount from text."""
+def parse_amount(text: Any) -> Optional[Decimal]:
+    """Parse monetary amount from text or a JSON numeric value."""
+    if text is None or isinstance(text, bool):
+        return None
+    text = str(text).strip()
     if not text:
         return None
     text = fold_digits(text)
@@ -469,11 +479,20 @@ def parse_amount(text: str) -> Optional[Decimal]:
     except InvalidOperation:
         return None
 
+def parse_number(text: Any) -> Optional[Decimal]:
+    """Parse a numeric value or simple formatted number to Decimal.
 
-def parse_number(text: str) -> Optional[Decimal]:
-    """Parse a numeric value or simple formatted number to Decimal."""
+    JSON numeric values (int/float) are accepted as well as strings.
+    Booleans are rejected because bool is a subclass of int in Python.
+    """
+    if text is None or isinstance(text, bool):
+        return None
+
+    # Do not use `if not text` before conversion: numeric zero is valid.
+    text = str(text).strip()
     if not text:
         return None
+
     text = fold_digits(text)
     text = text.replace(",", "").replace("€", "").replace("$", "").replace("£", "")
     text = re.sub(r"\s+", "", text)
@@ -484,7 +503,6 @@ def parse_number(text: str) -> Optional[Decimal]:
         return Decimal(match.group())
     except InvalidOperation:
         return None
-
 
 def normalize_amount(value: str) -> Tuple[Optional[Decimal], Optional[str]]:
     """Normalize amount to Decimal. Returns (decimal_value, original_string)."""
