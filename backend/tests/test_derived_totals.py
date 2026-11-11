@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app import document_extractor as de
 from app.cross_document_validator import validate_cross_documents
 from app.derive import derive_totals
+from app.normalization import parse_amount, parse_number
 
 INVOICE_TEXT = """Invoice No : 27
 THYME ((ORIGANO) LOT NO : Z26
@@ -135,3 +136,25 @@ def test_a_real_discrepancy_is_still_a_mismatch():
 def test_agreeing_documents_pass_cleanly():
     check = _check(_docs("27667 KG"))
     assert check["status"] == "match" and "ignored" not in check
+
+
+
+# ---- numeric JSON values --------------------------------------------------
+
+def test_parse_number_accepts_json_numeric_values():
+    assert parse_number(1250) == parse_number("1250")
+    assert parse_number(1250.5) == parse_number("1250.5")
+    assert parse_number(0) == 0
+
+
+def test_parse_number_rejects_none_and_booleans():
+    assert parse_number(None) is None
+    assert parse_number(True) is None
+    assert parse_number(False) is None
+
+
+def test_parse_amount_accepts_json_numeric_values():
+    assert parse_amount(1250) == parse_amount("1250")
+    assert parse_amount(1250.5) == parse_amount("1250.5")
+    assert parse_amount(None) is None
+    assert parse_amount(True) is None
